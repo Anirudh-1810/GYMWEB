@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>IronPulse — Gym Client Dashboard</title>
+    <meta
+      name="description"
+      content="Clean, mobile-first dark-mode client roster and renewal tracker for gym owners with instant search, quick member onboarding, and direct WhatsApp & email messaging."
+    />
+    <meta property="og:title" content="IronPulse — Gym Client Dashboard" />
+    <meta
+      property="og:description"
+      content="Clean, mobile-first dark-mode client roster and renewal tracker for gym owners with instant search, quick member onboarding, and direct WhatsApp & email messaging."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      (function () {
+        try {
+          var saved = window.localStorage.getItem('ironpulse_theme_v1');
+          var isLight = saved === 'light';
+          document.documentElement.classList.toggle('dark', !isLight);
+          document.documentElement.style.colorScheme = isLight ? 'light' : 'dark';
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-[#F4F6F8] text-slate-950 dark:bg-[#090B0E] dark:text-[#F3F5F7] antialiased selection:bg-[#C8FF00] selection:text-[#090B0E]">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
