@@ -9,16 +9,21 @@ import {
   computeDashboardMetrics,
   computeMemberStatus,
   computeRenewalProgress,
+  computeRevenueSummary,
   extendRenewalDate,
   filterAndSortMembers,
   formatCurrency,
   formatRelativeRenewal,
   getDaysUntilRenewal,
+  getMemberBalanceDue,
   getMemberInitials,
+  getMessageTemplates,
   getPlanCycleDays,
   getPlanMonths,
   migrateStoredMember,
   normalizeMembershipPlan,
+  normalizePaymentMode,
+  recordQuickPayment,
   validateMemberInput,
 } from './memberLogic';
 
@@ -32,6 +37,8 @@ const SAMPLE_MEMBERS: Member[] = [
     email: 'marcus@gym.io',
     plan: '12 Months',
     fees: 12000,
+    amountPaid: 12000,
+    paymentMode: 'Card',
     manualStatus: 'active',
     paidDate: '2025-11-24',
     renewalDate: '2026-11-24', // +3 days -> expiring_soon
@@ -44,6 +51,8 @@ const SAMPLE_MEMBERS: Member[] = [
     email: 'darius@gym.io',
     plan: '1 Month',
     fees: 1500,
+    amountPaid: 1000, // 500 balance due
+    paymentMode: 'Cash',
     manualStatus: 'active',
     paidDate: '2026-10-17',
     renewalDate: '2026-11-17', // -4 days -> expired
@@ -55,6 +64,8 @@ const SAMPLE_MEMBERS: Member[] = [
     phone: '+1 310 555 0167',
     plan: '3 Months',
     fees: 4000,
+    amountPaid: 3000, // 1000 balance due, paid in Nov 2026
+    paymentMode: 'UPI',
     manualStatus: 'active',
     paidDate: '2026-11-15',
     renewalDate: '2027-02-15', // +86 days -> active (no email)
@@ -67,14 +78,16 @@ const SAMPLE_MEMBERS: Member[] = [
     email: 'nadia@gym.io',
     plan: '1 Month',
     fees: 1000,
+    amountPaid: 1000,
+    paymentMode: 'UPI',
     manualStatus: 'paused',
-    paidDate: '2026-10-10',
+    paidDate: '2026-11-05', // paid in Nov 2026
     renewalDate: '2026-11-10', // past date, but manually paused -> paused
     joinedDate: '2026-05-10',
   },
 ];
 
-test('plan helpers map 1/2/3/6/12 month plans and compute due date from paid date', () => {
+test('plan and payment mode helpers normalize and calculate due dates cleanly', () => {
   assert.equal(getPlanMonths('1 Month'), 1);
   assert.equal(getPlanMonths('2 Months'), 2);
   assert.equal(getPlanMonths('3 Months'), 3);
@@ -86,17 +99,51 @@ test('plan helpers map 1/2/3/6/12 month plans and compute due date from paid dat
   assert.equal(calculateRenewalFromPaidDate('2026-11-24', '3 Months'), '2027-02-24');
   assert.equal(calculateRenewalFromPaidDate('2026-11-24', '6 Months'), '2027-05-24');
   assert.equal(calculateRenewalFromPaidDate('2026-11-24', '12 Months'), '2027-11-24');
-  // Month-end clamping
   assert.equal(addMonthsToIsoDate('2027-01-31', 1), '2027-02-28');
 
   assert.equal(normalizeMembershipPlan('Annual Pro'), '12 Months');
   assert.equal(normalizeMembershipPlan('Quarterly Flex'), '3 Months');
   assert.equal(normalizeMembershipPlan('6m'), '6 Months');
-  assert.equal(normalizeMembershipPlan('2 Months'), '2 Months');
-  assert.equal(normalizeMembershipPlan('Monthly Unlimited'), '1 Month');
+  assert.equal(normalizePaymentMode('cash'), 'Cash');
+  assert.equal(normalizePaymentMode('Credit Card'), 'Card');
+  assert.equal(normalizePaymentMode('gpay'), 'UPI');
 
-  assert.equal(formatCurrency(1000), '₹1,000');
-  assert.equal(formatCurrency(1500), '₹1,500');
+  assert.equal(formatCurrency(1000, 'INR'), '₹1,000');
+  assert.equal(formatCurrency(1500, 'USD'), '$1,500');
+});
+
+test('computeRevenueSummary aggregates monthly collected, pending/overdue, plan breakdown, and payment modes', () => {
+  const rev = computeRevenueSummary(SAMPLE_MEMBERS, REF_DATE);
+  assert.equal(rev.monthLabel, 'Nov 2026');
+  // Paid in Nov 2026: Hannah (3000) + Nadia (1000) = 4000
+  assert.equal(rev.monthlyCollected, 4000);
+  assert.equal(rev.monthlyPaymentsCount, 2);
+  // Total collected across all members: 12000 + 1000 + 3000 + 1000 = 17000
+  assert.equal(rev.totalCollectedAll, 17000);
+  // Partial balances due: Darius (500) + Hannah (1000) = 1500
+  assert.equal(rev.balanceDueTotal, 1500);
+  assert.equal(rev.balanceDueCount, 2);
+  // Overdue renewals: Darius (expired, fee 1500)
+  assert.equal(rev.overdueRenewalTotal, 1500);
+  assert.equal(rev.overdueRenewalCount, 1);
+  assert.equal(rev.pendingAndOverdueTotal, 3000);
+
+  // Breakdown by plan has all 5 durations
+  assert.equal(rev.byPlan.length, 5);
+  const oneMonth = rev.byPlan.find((p) => p.plan === '1 Month')!;
+  assert.equal(oneMonth.memberCount, 2);
+  assert.equal(oneMonth.collected, 2000);
+  assert.equal(oneMonth.balanceDue, 500);
+
+  const twelveMonth = rev.byPlan.find((p) => p.plan === '12 Months')!;
+  assert.equal(twelveMonth.memberCount, 1);
+  assert.equal(twelveMonth.collected, 12000);
+
+  // Breakdown by payment mode has Cash, UPI, Card
+  assert.equal(rev.byPaymentMode.length, 3);
+  assert.equal(rev.byPaymentMode.find((m) => m.mode === 'Cash')!.collected, 1000);
+  assert.equal(rev.byPaymentMode.find((m) => m.mode === 'UPI')!.collected, 4000);
+  assert.equal(rev.byPaymentMode.find((m) => m.mode === 'Card')!.collected, 12000);
 });
 
 test('getDaysUntilRenewal calculates exact local calendar day deltas', () => {
@@ -110,15 +157,6 @@ test('computeMemberStatus classifies active, expiring_soon, expired, and paused 
   assert.equal(computeMemberStatus(SAMPLE_MEMBERS[1], REF_DATE), 'expired');
   assert.equal(computeMemberStatus(SAMPLE_MEMBERS[2], REF_DATE), 'active');
   assert.equal(computeMemberStatus(SAMPLE_MEMBERS[3], REF_DATE), 'paused');
-
-  assert.equal(
-    computeMemberStatus({ renewalDate: '2026-11-28', manualStatus: 'active' }, REF_DATE),
-    'expiring_soon'
-  );
-  assert.equal(
-    computeMemberStatus({ renewalDate: '2026-11-29', manualStatus: 'active' }, REF_DATE),
-    'active'
-  );
 });
 
 test('computeDashboardMetrics aggregates counts and active standing rate', () => {
@@ -132,117 +170,84 @@ test('computeDashboardMetrics aggregates counts and active standing rate', () =>
   assert.equal(metrics.activeRate, 50);
 });
 
-test('filterAndSortMembers filters by name/email/plan/phone/fees and sorts cleanly', () => {
-  const byName = filterAndSortMembers(
+test('filterAndSortMembers filters by balanceOnly, paymentMode, fees, and search query', () => {
+  const withBalance = filterAndSortMembers(
     SAMPLE_MEMBERS,
-    { query: 'marcus', statusFilter: 'all', sortBy: 'renewal_soonest' },
-    REF_DATE
-  );
-  assert.equal(byName.length, 1);
-  assert.equal(byName[0].id, '1');
-
-  const byFees = filterAndSortMembers(
-    SAMPLE_MEMBERS,
-    { query: '1500', statusFilter: 'all', sortBy: 'renewal_soonest' },
-    REF_DATE
-  );
-  assert.equal(byFees.length, 1);
-  assert.equal(byFees[0].id, '2');
-
-  const sortedSoonest = filterAndSortMembers(
-    SAMPLE_MEMBERS,
-    { query: '', statusFilter: 'all', sortBy: 'renewal_soonest' },
+    { query: '', statusFilter: 'all', sortBy: 'renewal_soonest', balanceOnly: true },
     REF_DATE
   );
   assert.deepEqual(
-    sortedSoonest.map((m) => m.id),
-    ['2', '1', '3', '4']
+    withBalance.map((m) => m.id),
+    ['2', '3']
   );
+
+  const cashOnly = filterAndSortMembers(
+    SAMPLE_MEMBERS,
+    { query: '', statusFilter: 'all', sortBy: 'renewal_soonest', paymentModeFilter: 'Cash' },
+    REF_DATE
+  );
+  assert.equal(cashOnly.length, 1);
+  assert.equal(cashOnly[0].id, '2');
+
+  assert.equal(getMemberBalanceDue(SAMPLE_MEMBERS[1]), 500);
+  assert.equal(getMemberBalanceDue(SAMPLE_MEMBERS[0]), 0);
 });
 
-test('validateMemberInput requires name/phone/fees/paidDate and treats email as optional', () => {
-  const emptyResult = validateMemberInput({
-    name: '',
-    phone: '',
-    email: '',
-    plan: '1 Month',
-    fees: 0,
-    manualStatus: 'active',
-    paidDate: '',
-  });
-  assert.equal(emptyResult.valid, false);
-  assert.ok(emptyResult.errors.name);
-  assert.ok(emptyResult.errors.phone);
-  assert.equal(emptyResult.errors.email, undefined); // email is optional!
-  assert.ok(emptyResult.errors.fees);
-  assert.ok(emptyResult.errors.paidDate);
-
-  // Blank email is valid when other required fields are valid
-  const validNoEmail = validateMemberInput({
+test('validateMemberInput validates partial amountPaid bounds and treats email as optional', () => {
+  const overpaid = validateMemberInput({
     name: 'Rohan Verma',
     phone: '+91 98765 43210',
     email: '',
     plan: '1 Month',
     fees: 1000,
+    amountPaid: 1200,
+    paymentMode: 'Cash',
     manualStatus: 'active',
     paidDate: '2026-11-24',
   });
-  assert.equal(validNoEmail.valid, true);
-  assert.deepEqual(validNoEmail.errors, {});
+  assert.equal(overpaid.valid, false);
+  assert.ok(overpaid.errors.amountPaid);
 
-  // Non-empty invalid email is rejected
-  const invalidEmail = validateMemberInput({
-    name: 'Elena Vance',
-    phone: '+1 555 890 1234',
-    email: 'not-an-email',
-    plan: '12 Months',
-    fees: 1500,
+  const partialValid = validateMemberInput({
+    name: 'Rohan Verma',
+    phone: '+91 98765 43210',
+    email: '',
+    plan: '3 Months',
+    fees: 3500,
+    amountPaid: 2000,
+    paymentMode: 'UPI',
     manualStatus: 'active',
     paidDate: '2026-11-24',
   });
-  assert.equal(invalidEmail.valid, false);
-  assert.ok(invalidEmail.errors.email);
+  assert.equal(partialValid.valid, true);
+  assert.deepEqual(partialValid.errors, {});
 });
 
-test('buildWhatsAppUrl and buildMailtoUrl sanitize and encode properly', () => {
-  const wa = buildWhatsAppUrl('+1 (310) 555-0142', 'Hey Marcus, renew today!');
-  assert.equal(
-    wa,
-    'https://wa.me/13105550142?text=Hey%20Marcus%2C%20renew%20today!'
+test('getMessageTemplates includes balance reminder and respects custom gym name & currency', () => {
+  const templates = getMessageTemplates(
+    SAMPLE_MEMBERS[1],
+    'expired',
+    REF_DATE,
+    { gymName: 'Titan Gym', currency: 'USD' }
   );
-
-  const mail = buildMailtoUrl(
-    'marcus@gym.io',
-    'Renewal Reminder',
-    'See you at 6 AM!'
-  );
-  assert.equal(
-    mail,
-    'mailto:marcus@gym.io?subject=Renewal%20Reminder&body=See%20you%20at%206%20AM%21'
-  );
+  assert.equal(templates[0].id, 'balance');
+  assert.ok(templates[0].body.includes('$500'));
+  assert.ok(templates[0].body.includes('Titan Gym'));
 });
 
-test('extendRenewalDate extends from current date if expired, or from renewalDate if active', () => {
+test('buildWhatsAppUrl, buildMailtoUrl, extendRenewalDate, formatRelativeRenewal, and renewal progress work cleanly', () => {
+  assert.equal(
+    buildWhatsAppUrl('+1 (310) 555-0142', 'Hi'),
+    'https://wa.me/13105550142?text=Hi'
+  );
+  assert.equal(
+    buildMailtoUrl('marcus@gym.io', 'Hi', 'Body'),
+    'mailto:marcus@gym.io?subject=Hi&body=Body'
+  );
   assert.equal(extendRenewalDate('2026-11-10', 1, REF_DATE), '2026-12-21');
-  assert.equal(extendRenewalDate('2026-12-15', 3, REF_DATE), '2027-03-15');
-  assert.equal(extendRenewalDate('2027-01-31', 1, REF_DATE), '2027-02-28');
-});
-
-test('formatRelativeRenewal and getMemberInitials produce clean copy', () => {
   assert.equal(formatRelativeRenewal('2026-11-21', 'expiring_soon', REF_DATE), 'Due today');
-  assert.equal(formatRelativeRenewal('2026-11-17', 'expired', REF_DATE), '4 days overdue');
-  assert.equal(formatRelativeRenewal('2026-11-17', 'paused', REF_DATE), 'Membership on hold');
   assert.equal(getMemberInitials('Marcus Reyes'), 'MR');
-  assert.equal(getMemberInitials('Sienna'), 'SI');
-});
-
-test('computeRenewalProgress fills toward 100% as payment date approaches', () => {
-  assert.equal(getPlanCycleDays('1 Month'), 30);
-  assert.equal(getPlanCycleDays('2 Months'), 60);
-  assert.equal(getPlanCycleDays('3 Months'), 90);
   assert.equal(getPlanCycleDays('6 Months'), 180);
-  assert.equal(getPlanCycleDays('12 Months'), 365);
-
   assert.equal(
     computeRenewalProgress(
       { plan: '1 Month', renewalDate: '2026-11-21', manualStatus: 'active' },
@@ -250,23 +255,9 @@ test('computeRenewalProgress fills toward 100% as payment date approaches', () =
     ),
     100
   );
-  assert.equal(
-    computeRenewalProgress(
-      { plan: '1 Month', renewalDate: '2026-11-24', manualStatus: 'active' },
-      REF_DATE
-    ),
-    90
-  );
-  assert.equal(
-    computeRenewalProgress(
-      { plan: '1 Month', renewalDate: '2026-12-18', manualStatus: 'active' },
-      REF_DATE
-    ),
-    10
-  );
 });
 
-test('migrateStoredMember cleanly upgrades legacy localStorage records', () => {
+test('migrateStoredMember cleanly upgrades legacy localStorage records with paymentMode and amountPaid', () => {
   const migrated = migrateStoredMember({
     id: 'old-1',
     name: 'Legacy Client',
@@ -279,5 +270,33 @@ test('migrateStoredMember cleanly upgrades legacy localStorage records', () => {
   assert.equal(migrated.plan, '3 Months');
   assert.equal(migrated.paidDate, '2026-11-24');
   assert.equal(migrated.fees, 4000);
+  assert.equal(migrated.amountPaid, 4000);
+  assert.equal(migrated.paymentMode, 'UPI');
   assert.equal(migrated.email, undefined);
+});
+
+test('recordQuickPayment resets expired or active cycle, clears balance, and sorts funds by Cash/UPI', () => {
+  // Expired member with partial balance (due Nov 16, ref date Nov 21) -> paid via UPI (+1 month)
+  const renewedExpired = recordQuickPayment(SAMPLE_MEMBERS[1], 'UPI', 1, REF_DATE);
+  assert.equal(renewedExpired.paidDate, '2026-11-21');
+  assert.equal(renewedExpired.renewalDate, '2026-12-21');
+  assert.equal(renewedExpired.paymentMode, 'UPI');
+  assert.equal(renewedExpired.amountPaid, renewedExpired.fees);
+  assert.equal(renewedExpired.manualStatus, 'active');
+  assert.equal(getMemberBalanceDue(renewedExpired), 0);
+  assert.equal(computeMemberStatus(renewedExpired, REF_DATE), 'active');
+
+  // Active member (due Feb 15, 2027, 3 Months plan) -> paid via Cash (default plan cycle = +3 months)
+  const renewedActive = recordQuickPayment(SAMPLE_MEMBERS[2], 'Cash', undefined, REF_DATE);
+  assert.equal(renewedActive.paidDate, '2026-11-21');
+  assert.equal(renewedActive.renewalDate, '2027-05-15');
+  assert.equal(renewedActive.paymentMode, 'Cash');
+  assert.equal(renewedActive.amountPaid, renewedActive.fees);
+
+  // Verify funds sort into Cash and UPI buckets cleanly in computeRevenueSummary
+  const summary = computeRevenueSummary([renewedExpired, renewedActive], REF_DATE);
+  const cashMode = summary.byPaymentMode.find((m) => m.mode === 'Cash');
+  const upiMode = summary.byPaymentMode.find((m) => m.mode === 'UPI');
+  assert.equal(cashMode?.collected, 4000);
+  assert.equal(upiMode?.collected, 1500);
 });

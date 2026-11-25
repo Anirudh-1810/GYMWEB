@@ -2,6 +2,7 @@ import { useState } from 'react';
 import {
   AlertCircle,
   Calendar,
+  Check,
   CheckCircle2,
   Clock,
   Mail,
@@ -9,6 +10,7 @@ import {
   PauseCircle,
   SlidersHorizontal,
 } from 'lucide-react';
+import { CurrencyCode } from '../utils/branding';
 import {
   ComputedStatus,
   Member,
@@ -17,14 +19,18 @@ import {
   formatCurrency,
   formatDisplayDate,
   formatRelativeRenewal,
+  getMemberBalanceDue,
   getMemberInitials,
   getStatusLabel,
 } from '../utils/memberLogic';
 
 interface MemberCardProps {
   member: Member;
+  currency: CurrencyCode;
   onMessage: (member: Member, channel: 'whatsapp' | 'email') => void;
   onManage: (member: Member) => void;
+  onQuickPay?: (member: Member) => void;
+  onSettleBalance?: (memberId: string) => void;
 }
 
 const STATUS_META: Record<
@@ -76,7 +82,14 @@ const STATUS_META: Record<
   },
 };
 
-export function MemberCard({ member, onMessage, onManage }: MemberCardProps) {
+export function MemberCard({
+  member,
+  currency,
+  onMessage,
+  onManage,
+  onQuickPay,
+  onSettleBalance,
+}: MemberCardProps) {
   const [imgFailed, setImgFailed] = useState(false);
 
   const status = computeMemberStatus(member);
@@ -86,6 +99,7 @@ export function MemberCard({ member, onMessage, onManage }: MemberCardProps) {
   const relativeRenewal = formatRelativeRenewal(member.renewalDate, status);
   const renewalProgress = computeRenewalProgress(member);
   const initials = getMemberInitials(member.name);
+  const balanceDue = getMemberBalanceDue(member);
   const {
     textClass,
     dueDateClass,
@@ -124,22 +138,30 @@ export function MemberCard({ member, onMessage, onManage }: MemberCardProps) {
               )}
             </div>
 
-            {/* Name & Plan + Custom Fees */}
-            <h3 className="mt-1.5 text-lg font-semibold leading-snug text-slate-950 dark:text-[#F3F5F7] truncate tracking-[0.01em]">
+            {/* Name & Prominent Fees + Plan + Payment Mode */}
+            <h3 className="mt-1.5 text-2xl sm:text-[26px] font-bold leading-tight text-slate-950 dark:text-[#F3F5F7] truncate tracking-tight">
               {member.name}
             </h3>
-            <p className="mt-0.5 flex items-center gap-1.5 text-xs text-slate-600 dark:text-[#8A97AB] truncate">
-              <span>{member.plan}</span>
+            <div className="mt-1.5 flex items-baseline gap-2 min-w-0 flex-wrap">
+              <span className="font-mono text-xl sm:text-[22px] font-bold leading-none tabular-nums text-lime-800 dark:text-[#C8FF00] whitespace-nowrap">
+                {formatCurrency(member.fees, currency)}
+              </span>
               <span aria-hidden="true" className="text-slate-300 dark:text-white/25">
                 ·
               </span>
-              <span className="font-mono font-semibold tabular-nums text-slate-900 dark:text-[#C8FF00]">
-                {formatCurrency(member.fees)}
+              <span className="text-sm font-medium text-slate-600 dark:text-[#94A3B8] whitespace-nowrap">
+                {member.plan}
               </span>
-            </p>
+              <span aria-hidden="true" className="text-slate-300 dark:text-white/25">
+                ·
+              </span>
+              <span className="text-xs font-medium text-slate-500 dark:text-[#7E8B9E] whitespace-nowrap">
+                {member.paymentMode}
+              </span>
+            </div>
 
             {/* Contact Info */}
-            <div className="mt-3 space-y-0.5 text-xs text-slate-600 dark:text-[#8A97AB]">
+            <div className="mt-2.5 space-y-0.5 text-xs text-slate-600 dark:text-[#8A97AB]">
               <p className="font-mono tabular-nums text-slate-800 dark:text-[#B4C0D3] truncate">
                 {member.phone}
               </p>
@@ -147,11 +169,11 @@ export function MemberCard({ member, onMessage, onManage }: MemberCardProps) {
             </div>
           </div>
 
-          {/* Right Side: Person Photo or Initials Avatar */}
-          <div className="shrink-0">
+          {/* Right Side: Person Photo / Initials Avatar + Quick Paid Button Below */}
+          <div className="flex flex-col items-center gap-2 shrink-0">
             {showPhoto ? (
               <div
-                className={`h-[76px] w-[76px] overflow-hidden rounded-xl border bg-slate-100 dark:bg-[#0B0E13] ${avatarBorderClass}`}
+                className={`h-20 w-20 overflow-hidden rounded-xl border bg-slate-100 dark:bg-[#0B0E13] ${avatarBorderClass}`}
               >
                 <img
                   src={member.avatarUrl}
@@ -164,10 +186,23 @@ export function MemberCard({ member, onMessage, onManage }: MemberCardProps) {
             ) : (
               <div
                 aria-hidden="true"
-                className={`flex h-[76px] w-[76px] items-center justify-center rounded-xl border font-display text-2xl font-bold tracking-wider ${avatarFallbackClass}`}
+                className={`flex h-20 w-20 items-center justify-center rounded-xl border font-display text-2xl font-bold tracking-wider ${avatarFallbackClass}`}
               >
                 {initials}
               </div>
+            )}
+
+            {onQuickPay && (
+              <button
+                type="button"
+                onClick={() => onQuickPay(member)}
+                data-testid={`quick-pay-${member.id}`}
+                aria-label={`Mark ${member.name} as paid`}
+                className="inline-flex w-20 min-h-[34px] items-center justify-center gap-1 rounded-lg border border-emerald-600/35 bg-emerald-50 text-emerald-800 hover:bg-emerald-600 hover:text-white dark:border-[#C8FF00]/45 dark:bg-[#C8FF00]/12 dark:text-[#C8FF00] dark:hover:bg-[#C8FF00] dark:hover:text-[#090B0E] text-xs font-bold transition-colors duration-150 whitespace-nowrap"
+              >
+                <Check className="h-3.5 w-3.5 stroke-[2.5] shrink-0" aria-hidden="true" />
+                <span>Paid</span>
+              </button>
             )}
           </div>
         </div>
@@ -176,6 +211,34 @@ export function MemberCard({ member, onMessage, onManage }: MemberCardProps) {
           <p className="mt-3 text-xs text-slate-600 dark:text-[#7E8B9E] truncate">{member.notes}</p>
         )}
       </div>
+
+      {/* Partial Payment Balance Due Line (only when unpaid balance > 0) */}
+      {balanceDue > 0 && (
+        <div
+          data-testid={`balance-due-${member.id}`}
+          className="flex items-center justify-between gap-3 border-t border-amber-200 dark:border-amber-500/25 bg-amber-50/90 dark:bg-amber-500/10 px-5 py-2.5 text-xs"
+        >
+          <div className="min-w-0 tabular-nums">
+            <span className="font-bold text-amber-900 dark:text-amber-300">
+              Balance Due {formatCurrency(balanceDue, currency)}
+            </span>
+            <span className="text-amber-800/80 dark:text-amber-200/75">
+              {' '}
+              · Paid {formatCurrency(member.amountPaid, currency)}
+            </span>
+          </div>
+          {onSettleBalance && (
+            <button
+              type="button"
+              onClick={() => onSettleBalance(member.id)}
+              aria-label={`Mark balance paid for ${member.name}`}
+              className="shrink-0 rounded-md border border-amber-700/30 dark:border-amber-400/40 bg-white dark:bg-[#11151B] px-2.5 py-1 text-[11px] font-bold text-amber-900 hover:bg-amber-700 hover:text-white dark:text-amber-300 dark:hover:bg-amber-400 dark:hover:text-[#090B0E] transition-colors whitespace-nowrap"
+            >
+              Mark Paid
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Prominent Due Date & Billing Cycle Progress Bar (Directly above WhatsApp & Email) */}
       <div className="px-5 py-3.5 border-t border-slate-200 dark:border-white/[0.08] bg-slate-50/90 dark:bg-[#0D1117]">

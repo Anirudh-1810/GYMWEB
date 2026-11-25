@@ -1,9 +1,13 @@
+import { CurrencyCode, DEFAULT_BRANDING, formatMoney } from './branding';
+
 export type MembershipPlan =
   | '1 Month'
   | '2 Months'
   | '3 Months'
   | '6 Months'
   | '12 Months';
+
+export type PaymentMode = 'Cash' | 'UPI' | 'Card';
 
 export type ManualStatus = 'active' | 'paused';
 
@@ -20,6 +24,8 @@ export interface Member {
   email?: string;
   plan: MembershipPlan;
   fees: number;
+  amountPaid: number;
+  paymentMode: PaymentMode;
   manualStatus: ManualStatus;
   paidDate: string; // YYYY-MM-DD
   renewalDate: string; // YYYY-MM-DD (calculated due date)
@@ -35,6 +41,8 @@ export interface MemberFormInput {
   email?: string;
   plan: MembershipPlan;
   fees: number;
+  amountPaid?: number;
+  paymentMode: PaymentMode;
   manualStatus: ManualStatus;
   paidDate: string;
   renewalDate?: string;
@@ -57,6 +65,36 @@ export interface DashboardMetrics {
   activeRate: number; // 0-100 integer percentage
 }
 
+export interface PlanRevenueBreakdown {
+  plan: MembershipPlan;
+  memberCount: number;
+  totalFees: number;
+  collected: number;
+  balanceDue: number;
+  sharePercent: number;
+}
+
+export interface PaymentModeBreakdown {
+  mode: PaymentMode;
+  memberCount: number;
+  collected: number;
+  sharePercent: number;
+}
+
+export interface RevenueSummary {
+  monthLabel: string;
+  monthlyCollected: number;
+  monthlyPaymentsCount: number;
+  totalCollectedAll: number;
+  balanceDueTotal: number;
+  balanceDueCount: number;
+  overdueRenewalTotal: number;
+  overdueRenewalCount: number;
+  pendingAndOverdueTotal: number;
+  byPlan: PlanRevenueBreakdown[];
+  byPaymentMode: PaymentModeBreakdown[];
+}
+
 export const MEMBERSHIP_PLANS: MembershipPlan[] = [
   '1 Month',
   '2 Months',
@@ -64,6 +102,8 @@ export const MEMBERSHIP_PLANS: MembershipPlan[] = [
   '6 Months',
   '12 Months',
 ];
+
+export const PAYMENT_MODES: PaymentMode[] = ['Cash', 'UPI', 'Card'];
 
 export const FEE_PRESETS: number[] = [1000, 1500, 2500, 4500, 8000];
 
@@ -136,15 +176,41 @@ export function normalizeMembershipPlan(rawPlan: string): MembershipPlan {
 }
 
 /**
+ * Normalizes payment mode strings (e.g. from CSV or storage) to Cash, UPI, or Card.
+ */
+export function normalizePaymentMode(rawMode: string): PaymentMode {
+  const lower = rawMode.trim().toLowerCase();
+  if (lower === 'cash' || lower.includes('cash')) return 'Cash';
+  if (
+    lower === 'card' ||
+    lower.includes('credit') ||
+    lower.includes('debit') ||
+    lower.includes('pos')
+  ) {
+    return 'Card';
+  }
+  return 'UPI';
+}
+
+/**
  * Formats a membership fee amount cleanly with currency symbol and grouping.
  */
-export function formatCurrency(amount: number): string {
-  if (!Number.isFinite(amount)) {
-    return '₹0';
-  }
-  return `₹${new Intl.NumberFormat('en-IN', {
-    maximumFractionDigits: 0,
-  }).format(Math.round(amount))}`;
+export function formatCurrency(
+  amount: number,
+  currency: CurrencyCode = 'INR'
+): string {
+  return formatMoney(amount, currency);
+}
+
+/**
+ * Returns the unpaid partial balance for a member (always >= 0).
+ */
+export function getMemberBalanceDue(
+  member: Pick<Member, 'fees' | 'amountPaid'>
+): number {
+  const fees = Number.isFinite(member.fees) ? member.fees : 0;
+  const paid = Number.isFinite(member.amountPaid) ? member.amountPaid : fees;
+  return Math.max(0, Math.round(fees - paid));
 }
 
 /**
@@ -307,8 +373,6 @@ export function formatRelativeRenewal(
 
 /**
  * Computes billing cycle progress (0-100) that fills as the due/payment date approaches.
- * Uses the exact span between paidDate and renewalDate when valid, otherwise falls back
- * to the plan cycle length.
  */
 export function computeRenewalProgress(
   member: Pick<Member, 'plan' | 'renewalDate' | 'manualStatus'> & {
@@ -385,7 +449,131 @@ export function computeDashboardMetrics(
 }
 
 /**
- * Filters members by search query + status filter and applies deterministic sorting.
+ * Computes monthly revenue collected, pending/overdue fees, partial balance due,
+ * plan breakdown (1/2/3/6/12 months), and payment mode breakdown (Cash/UPI/Card).
+ */
+export function computeRevenueSummary(
+  members: Member[],
+  referenceDate: Date = new Date()
+): RevenueSummary {
+  const refYear = referenceDate.getFullYear();
+  const refMonth = referenceDate.getMonth();
+  const monthLabel = new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    year: 'numeric',
+  }).format(referenceDate);
+
+  let monthlyCollected = 0;
+  let monthlyPaymentsCount = 0;
+  let totalCollectedAll = 0;
+  let balanceDueTotal = 0;
+  let balanceDueCount = 0;
+  let overdueRenewalTotal = 0;
+  let overdueRenewalCount = 0;
+
+  const planMap = new Map<
+    MembershipPlan,
+    { memberCount: number; totalFees: number; collected: number; balanceDue: number }
+  >();
+  for (const plan of MEMBERSHIP_PLANS) {
+    planMap.set(plan, { memberCount: 0, totalFees: 0, collected: 0, balanceDue: 0 });
+  }
+
+  const modeMap = new Map<PaymentMode, { memberCount: number; collected: number }>();
+  for (const mode of PAYMENT_MODES) {
+    modeMap.set(mode, { memberCount: 0, collected: 0 });
+  }
+
+  for (const member of members) {
+    const fees = Math.max(0, Math.round(member.fees));
+    const paid = Math.max(0, Math.min(fees, Math.round(member.amountPaid)));
+    const balance = Math.max(0, fees - paid);
+    const status = computeMemberStatus(member, referenceDate);
+
+    totalCollectedAll += paid;
+
+    const parsedPaid = parseIsoDate(member.paidDate);
+    if (
+      parsedPaid &&
+      parsedPaid.getFullYear() === refYear &&
+      parsedPaid.getMonth() === refMonth &&
+      paid > 0
+    ) {
+      monthlyCollected += paid;
+      monthlyPaymentsCount += 1;
+    }
+
+    if (balance > 0) {
+      balanceDueTotal += balance;
+      balanceDueCount += 1;
+    }
+
+    if (status === 'expired') {
+      overdueRenewalTotal += fees;
+      overdueRenewalCount += 1;
+    }
+
+    const planEntry = planMap.get(member.plan);
+    if (planEntry) {
+      planEntry.memberCount += 1;
+      planEntry.totalFees += fees;
+      planEntry.collected += paid;
+      planEntry.balanceDue += balance;
+    }
+
+    const modeEntry = modeMap.get(member.paymentMode);
+    if (modeEntry) {
+      modeEntry.memberCount += 1;
+      modeEntry.collected += paid;
+    }
+  }
+
+  const byPlan: PlanRevenueBreakdown[] = MEMBERSHIP_PLANS.map((plan) => {
+    const entry = planMap.get(plan)!;
+    return {
+      plan,
+      memberCount: entry.memberCount,
+      totalFees: entry.totalFees,
+      collected: entry.collected,
+      balanceDue: entry.balanceDue,
+      sharePercent:
+        totalCollectedAll === 0
+          ? 0
+          : Math.round((entry.collected / totalCollectedAll) * 100),
+    };
+  });
+
+  const byPaymentMode: PaymentModeBreakdown[] = PAYMENT_MODES.map((mode) => {
+    const entry = modeMap.get(mode)!;
+    return {
+      mode,
+      memberCount: entry.memberCount,
+      collected: entry.collected,
+      sharePercent:
+        totalCollectedAll === 0
+          ? 0
+          : Math.round((entry.collected / totalCollectedAll) * 100),
+    };
+  });
+
+  return {
+    monthLabel,
+    monthlyCollected,
+    monthlyPaymentsCount,
+    totalCollectedAll,
+    balanceDueTotal,
+    balanceDueCount,
+    overdueRenewalTotal,
+    overdueRenewalCount,
+    pendingAndOverdueTotal: balanceDueTotal + overdueRenewalTotal,
+    byPlan,
+    byPaymentMode,
+  };
+}
+
+/**
+ * Filters members by search query, status filter, optional payment mode / balance-due
+ * filter, and applies deterministic sorting.
  */
 export function filterAndSortMembers(
   members: Member[],
@@ -393,6 +581,8 @@ export function filterAndSortMembers(
     query: string;
     statusFilter: StatusFilter;
     sortBy: SortOption;
+    balanceOnly?: boolean;
+    paymentModeFilter?: PaymentMode | 'all';
   },
   referenceDate: Date = new Date()
 ): Member[] {
@@ -406,6 +596,18 @@ export function filterAndSortMembers(
       }
     }
 
+    if (options.balanceOnly && getMemberBalanceDue(member) <= 0) {
+      return false;
+    }
+
+    if (
+      options.paymentModeFilter &&
+      options.paymentModeFilter !== 'all' &&
+      member.paymentMode !== options.paymentModeFilter
+    ) {
+      return false;
+    }
+
     if (!normalizedQuery) {
       return true;
     }
@@ -414,13 +616,16 @@ export function filterAndSortMembers(
     const phoneDigits = member.phone.replace(/\D/g, '');
     const emailLower = (member.email ?? '').toLowerCase();
     const feesString = String(member.fees);
+    const hasBalance = getMemberBalanceDue(member) > 0;
 
     return (
       member.name.toLowerCase().includes(normalizedQuery) ||
       emailLower.includes(normalizedQuery) ||
       member.plan.toLowerCase().includes(normalizedQuery) ||
+      member.paymentMode.toLowerCase().includes(normalizedQuery) ||
       member.phone.toLowerCase().includes(normalizedQuery) ||
       feesString.includes(normalizedQuery) ||
+      (normalizedQuery.includes('balance') && hasBalance) ||
       (digitsOnlyQuery.length >= 3 && phoneDigits.includes(digitsOnlyQuery))
     );
   });
@@ -436,7 +641,6 @@ export function filterAndSortMembers(
         a.name.localeCompare(b.name)
       );
     }
-    // renewal_soonest: paused members at bottom, then soonest renewal date
     const statusA = computeMemberStatus(a, referenceDate);
     const statusB = computeMemberStatus(b, referenceDate);
     if (statusA === 'paused' && statusB !== 'paused') return 1;
@@ -449,7 +653,7 @@ export function filterAndSortMembers(
 
 /**
  * Validates new/edited member form values strictly without substituting fallbacks.
- * Email is optional; when provided, it must be a valid email address.
+ * Email is optional; amountPaid (when supplied) must be between 0 and fees.
  */
 export function validateMemberInput(input: MemberFormInput): ValidationResult {
   const errors: Partial<Record<keyof MemberFormInput, string>> = {};
@@ -474,6 +678,14 @@ export function validateMemberInput(input: MemberFormInput): ValidationResult {
 
   if (!Number.isFinite(input.fees) || input.fees <= 0) {
     errors.fees = 'Enter a valid fee amount greater than 0.';
+  }
+
+  if (input.amountPaid !== undefined) {
+    if (!Number.isFinite(input.amountPaid) || input.amountPaid < 0) {
+      errors.amountPaid = 'Enter a valid amount paid (0 or more).';
+    } else if (Number.isFinite(input.fees) && input.amountPaid > input.fees) {
+      errors.amountPaid = 'Amount paid cannot exceed total fees.';
+    }
   }
 
   if (!input.paidDate.trim()) {
@@ -541,8 +753,38 @@ export function extendRenewalDate(
 }
 
 /**
+ * Records a quick fee payment for a member, resetting Paid Date to today,
+ * extending the Due Date by monthsToAdd (defaulting to the member's plan
+ * duration — 1 month for 1-Month plans), clearing any unpaid balance,
+ * activating the membership, and sorting the payment into Cash, UPI, or Card.
+ */
+export function recordQuickPayment(
+  member: Member,
+  paymentMode: PaymentMode,
+  monthsToAdd: number = getPlanMonths(member.plan),
+  referenceDate: Date = new Date()
+): Member {
+  const todayIso = toIsoDateString(referenceDate);
+  const safeMonths = Math.max(1, Math.round(monthsToAdd));
+  const nextRenewalDate = extendRenewalDate(
+    member.renewalDate,
+    safeMonths,
+    referenceDate
+  );
+
+  return {
+    ...member,
+    paidDate: todayIso,
+    renewalDate: nextRenewalDate,
+    paymentMode,
+    amountPaid: member.fees,
+    manualStatus: 'active',
+  };
+}
+
+/**
  * Migrates any legacy localStorage member records cleanly to the current schema
- * (1/2/3/6/12 Month plans, paidDate, fees, optional email).
+ * (1/2/3/6/12 Month plans, paidDate, fees, amountPaid, paymentMode, optional email).
  */
 export function migrateStoredMember(
   raw: Record<string, unknown>,
@@ -573,8 +815,22 @@ export function migrateStoredMember(
   const parsedFees = Number(raw.fees);
   const fees =
     Number.isFinite(parsedFees) && parsedFees > 0
-      ? parsedFees
+      ? Math.round(parsedFees)
       : defaultFeeForPlan[plan];
+
+  const parsedPaidAmount =
+    raw.amountPaid !== undefined && raw.amountPaid !== null
+      ? Number(raw.amountPaid)
+      : Number.NaN;
+  const amountPaid =
+    Number.isFinite(parsedPaidAmount) && parsedPaidAmount >= 0
+      ? Math.min(fees, Math.round(parsedPaidAmount))
+      : fees;
+
+  const paymentMode =
+    typeof raw.paymentMode === 'string'
+      ? normalizePaymentMode(raw.paymentMode)
+      : 'UPI';
 
   const emailValue = typeof raw.email === 'string' ? raw.email.trim() : '';
 
@@ -585,6 +841,8 @@ export function migrateStoredMember(
     email: emailValue || undefined,
     plan,
     fees,
+    amountPaid,
+    paymentMode,
     manualStatus: raw.manualStatus === 'paused' ? 'paused' : 'active',
     paidDate: rawPaid,
     renewalDate: rawRenewal,
@@ -623,38 +881,54 @@ export interface MessageTemplate {
 }
 
 /**
- * Generates contextual WhatsApp / Email templates tailored to member status.
+ * Generates contextual WhatsApp / Email templates tailored to member status,
+ * partial balance due, custom gym name, and selected currency.
  */
 export function getMessageTemplates(
   member: Member,
   status: ComputedStatus,
-  referenceDate: Date = new Date()
+  referenceDate: Date = new Date(),
+  branding: { gymName?: string; currency?: CurrencyCode } = {}
 ): MessageTemplate[] {
+  const gymName = branding.gymName?.trim() || DEFAULT_BRANDING.gymName;
+  const currency = branding.currency ?? DEFAULT_BRANDING.currency;
   const firstName = member.name.trim().split(/\s+/)[0] || 'there';
   const formattedDate = formatDisplayDate(member.renewalDate);
-  const formattedFees = formatCurrency(member.fees);
+  const formattedFees = formatCurrency(member.fees, currency);
+  const balanceDue = getMemberBalanceDue(member);
   const days = getDaysUntilRenewal(member.renewalDate, referenceDate);
+
+  const templates: MessageTemplate[] = [];
+
+  if (balanceDue > 0) {
+    templates.push({
+      id: 'balance',
+      label: 'Balance Reminder',
+      subject: `Pending balance of ${formatCurrency(balanceDue, currency)} — ${gymName}`,
+      body: `Hey ${firstName}, friendly reminder from ${gymName}: you have a pending balance of ${formatCurrency(balanceDue, currency)} on your ${member.plan} plan (paid ${formatCurrency(member.amountPaid, currency)} of ${formattedFees}). You can settle via Cash, UPI, or Card on your next visit!`,
+    });
+  }
 
   const renewalTemplate: MessageTemplate =
     status === 'expired'
       ? {
           id: 'renewal',
           label: 'Renewal Follow-Up',
-          subject: `Renew your ${member.plan} membership at IronPulse Gym`,
-          body: `Hey ${firstName}, your ${member.plan} plan (${formattedFees}) at IronPulse Gym was due on ${formattedDate} (${Math.abs(days)} ${Math.abs(days) === 1 ? 'day' : 'days'} ago). Reply here whenever you're ready to renew and keep your momentum going!`,
+          subject: `Renew your ${member.plan} membership at ${gymName}`,
+          body: `Hey ${firstName}, your ${member.plan} plan (${formattedFees}) at ${gymName} was due on ${formattedDate} (${Math.abs(days)} ${Math.abs(days) === 1 ? 'day' : 'days'} ago). Reply here whenever you're ready to renew and keep your momentum going!`,
         }
       : {
           id: 'renewal',
           label: 'Renewal Reminder',
-          subject: `Upcoming renewal on ${formattedDate} — IronPulse Gym`,
-          body: `Hey ${firstName}, quick heads-up that your ${member.plan} plan (${formattedFees}) is due on ${formattedDate}. Let me know if you'd like to renew for another term or switch plans!`,
+          subject: `Upcoming renewal on ${formattedDate} — ${gymName}`,
+          body: `Hey ${firstName}, quick heads-up that your ${member.plan} plan (${formattedFees}) at ${gymName} is due on ${formattedDate}. Let me know if you'd like to renew for another term or switch plans!`,
         };
 
   const checkinTemplate: MessageTemplate = {
     id: 'checkin',
     label: 'Training Check-In',
-    subject: `Quick check-in from IronPulse Gym`,
-    body: `Hey ${firstName}, hope your training week is going strong! Let me know if you need any program tweaks or want to book a form check session this week.`,
+    subject: `Quick check-in from ${gymName}`,
+    body: `Hey ${firstName}, hope your training week at ${gymName} is going strong! Let me know if you need any program tweaks or want to book a form check session this week.`,
   };
 
   const welcomeBackTemplate: MessageTemplate = {
@@ -662,13 +936,14 @@ export function getMessageTemplates(
     label: status === 'paused' ? 'Resume Membership' : 'Welcome Note',
     subject:
       status === 'paused'
-        ? `Ready to unpause your IronPulse Gym membership?`
-        : `Welcome to IronPulse Gym, ${firstName}!`,
+        ? `Ready to unpause your ${gymName} membership?`
+        : `Welcome to ${gymName}, ${firstName}!`,
     body:
       status === 'paused'
-        ? `Hey ${firstName}, hope you're doing well! Whenever you're ready to unpause your ${member.plan} membership and get back on the floor, just reply here and I'll reactivate it right away.`
-        : `Welcome to IronPulse Gym, ${firstName}! Your ${member.plan} plan (${formattedFees}) is active through ${formattedDate}. Message me anytime if you need anything at the gym.`,
+        ? `Hey ${firstName}, hope you're doing well! Whenever you're ready to unpause your ${member.plan} membership at ${gymName} and get back on the floor, just reply here and I'll reactivate it right away.`
+        : `Welcome to ${gymName}, ${firstName}! Your ${member.plan} plan (${formattedFees}) is active through ${formattedDate}. Message me anytime if you need anything at the gym.`,
   };
 
-  return [renewalTemplate, checkinTemplate, welcomeBackTemplate];
+  templates.push(renewalTemplate, checkinTemplate, welcomeBackTemplate);
+  return templates;
 }

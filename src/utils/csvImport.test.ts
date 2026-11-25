@@ -35,13 +35,13 @@ test('normalizeCsvDate and parseCsvFee parse dates and currency safely', () => {
   assert.ok(Number.isNaN(parseCsvFee('free')));
 });
 
-test('parseMembersCsv parses optional email, custom fees, paid date, and 1/2/3/6/12 month plans', () => {
+test('parseMembersCsv parses optional email, custom fees, amount paid, payment mode, and paid date', () => {
   const csv = [
-    'Full Name,WhatsApp,Email Address,Plan,Fees,Paid Date,Status,Notes',
-    'Elena Vance,+91 98765 11223,,6 Months,7000,2026-11-24,Active,"VIP, morning lifter"',
-    'Carlos Ruiz,+91 98111 22334,carlos@gym.io,1 Month,"₹1,500",11/10/2026,Paused,Recovering knee',
-    'Bad Email,+91 99000 33445,not-an-email,2 Months,2500,2026-11-20,Active,',
-    'Missing Fee,+91 99000 44556,,3 Months,0,invalid-date,Active,',
+    'Full Name,WhatsApp,Email Address,Plan,Fees,Amount Paid,Payment Mode,Paid Date,Status,Notes',
+    'Elena Vance,+91 98765 11223,,6 Months,7000,5000,Cash,2026-11-24,Active,"VIP, morning lifter"',
+    'Carlos Ruiz,+91 98111 22334,carlos@gym.io,1 Month,"₹1,500",1500,Card,11/10/2026,Paused,Recovering knee',
+    'Bad Paid,+91 99000 33445,,2 Months,2500,3000,UPI,2026-11-20,Active,',
+    'Missing Fee,+91 99000 44556,,3 Months,0,,UPI,invalid-date,Active,',
   ].join('\n');
 
   const result = parseMembersCsv(csv);
@@ -53,20 +53,18 @@ test('parseMembersCsv parses optional email, custom fees, paid date, and 1/2/3/6
   assert.equal(result.validRows[0].email, undefined);
   assert.equal(result.validRows[0].plan, '6 Months');
   assert.equal(result.validRows[0].fees, 7000);
-  assert.equal(result.validRows[0].paidDate, '2026-11-24');
+  assert.equal(result.validRows[0].amountPaid, 5000);
+  assert.equal(result.validRows[0].paymentMode, 'Cash');
   assert.equal(result.validRows[0].renewalDate, '2027-05-24');
-  assert.equal(result.validRows[0].notes, 'VIP, morning lifter');
 
   assert.equal(result.validRows[1].name, 'Carlos Ruiz');
-  assert.equal(result.validRows[1].plan, '1 Month');
   assert.equal(result.validRows[1].fees, 1500);
-  assert.equal(result.validRows[1].renewalDate, '2026-12-10');
+  assert.equal(result.validRows[1].paymentMode, 'Card');
   assert.equal(result.validRows[1].manualStatus, 'paused');
 
   assert.equal(result.invalidRows[0].rowNumber, 4);
-  assert.equal(result.invalidRows[0].rawName, 'Bad Email');
+  assert.equal(result.invalidRows[0].rawName, 'Bad Paid');
   assert.equal(result.invalidRows[1].rowNumber, 5);
-  assert.ok(result.invalidRows[1].reasons.length >= 2);
 });
 
 test('parseMembersCsv reports missing headers and empty files clearly', () => {

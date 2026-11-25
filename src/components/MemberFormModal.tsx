@@ -1,28 +1,34 @@
 import { ChangeEvent, DragEvent, FormEvent, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
+  Banknote,
   Calendar,
   CalendarPlus,
   Camera,
   CheckCircle2,
+  CreditCard,
   Download,
   FileSpreadsheet,
+  Smartphone,
   Trash2,
   Upload,
   X,
 } from 'lucide-react';
+import { CurrencyCode, getCurrencyOption } from '../utils/branding';
 import {
-  FEE_PRESETS,
   MEMBERSHIP_PLANS,
   ManualStatus,
   Member,
   MemberFormInput,
   MembershipPlan,
+  PAYMENT_MODES,
+  PaymentMode,
   ValidationResult,
   calculateRenewalFromPaidDate,
   extendRenewalDate,
   formatCurrency,
   formatDisplayDate,
+  getMemberBalanceDue,
   getMemberInitials,
   toIsoDateString,
   validateMemberInput,
@@ -36,22 +42,32 @@ import {
 interface MemberFormModalProps {
   isOpen: boolean;
   initialMode?: 'single' | 'csv';
+  currency: CurrencyCode;
   editingMember: Member | null;
   onClose: () => void;
   onSave: (input: MemberFormInput, editingId: string | null) => void;
   onBulkImport?: (inputs: MemberFormInput[]) => void;
   onQuickRenew?: (memberId: string, months: number) => void;
+  onSettleBalance?: (memberId: string) => void;
   onDelete?: (memberId: string) => void;
 }
+
+const MODE_ICON: Record<PaymentMode, typeof Banknote> = {
+  Cash: Banknote,
+  UPI: Smartphone,
+  Card: CreditCard,
+};
 
 export function MemberFormModal({
   isOpen,
   initialMode = 'single',
+  currency,
   editingMember,
   onClose,
   onSave,
   onBulkImport,
   onQuickRenew,
+  onSettleBalance,
   onDelete,
 }: MemberFormModalProps) {
   const [mode, setMode] = useState<'single' | 'csv'>(initialMode);
@@ -60,6 +76,9 @@ export function MemberFormModal({
   const [email, setEmail] = useState('');
   const [plan, setPlan] = useState<MembershipPlan>('1 Month');
   const [feesInput, setFeesInput] = useState('');
+  const [paymentMode, setPaymentMode] = useState<PaymentMode>('UPI');
+  const [isPartialPayment, setIsPartialPayment] = useState(false);
+  const [amountPaidInput, setAmountPaidInput] = useState('');
   const [manualStatus, setManualStatus] = useState<ManualStatus>('active');
   const [paidDate, setPaidDate] = useState('');
   const [avatarUrl, setAvatarUrl] = useState<string | undefined>(undefined);
@@ -74,6 +93,8 @@ export function MemberFormModal({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const csvInputRef = useRef<HTMLInputElement>(null);
 
+  const currencyOption = getCurrencyOption(currency);
+
   useEffect(() => {
     if (!isOpen) return;
     setMode(editingMember ? 'single' : initialMode);
@@ -81,11 +102,15 @@ export function MemberFormModal({
     setCsvResult(null);
     setIsDraggingCsv(false);
     if (editingMember) {
+      const hasBalance = getMemberBalanceDue(editingMember) > 0;
       setName(editingMember.name);
       setPhone(editingMember.phone);
       setEmail(editingMember.email ?? '');
       setPlan(editingMember.plan);
       setFeesInput(String(editingMember.fees));
+      setPaymentMode(editingMember.paymentMode);
+      setIsPartialPayment(hasBalance);
+      setAmountPaidInput(String(editingMember.amountPaid));
       setManualStatus(editingMember.manualStatus);
       setPaidDate(editingMember.paidDate);
       setAvatarUrl(editingMember.avatarUrl);
@@ -96,6 +121,9 @@ export function MemberFormModal({
       setEmail('');
       setPlan('1 Month');
       setFeesInput('');
+      setPaymentMode('UPI');
+      setIsPartialPayment(false);
+      setAmountPaidInput('');
       setManualStatus('active');
       setPaidDate(toIsoDateString(new Date()));
       setAvatarUrl(undefined);
@@ -121,6 +149,21 @@ export function MemberFormModal({
   const calculatedDueDate = paidDate
     ? calculateRenewalFromPaidDate(paidDate, plan)
     : '';
+
+  const parsedFeesPreview = feesInput.trim() ? Number(feesInput.trim()) : 0;
+  const parsedPaidPreview = isPartialPayment
+    ? amountPaidInput.trim()
+      ? Number(amountPaidInput.trim())
+      : 0
+    : parsedFeesPreview;
+  const liveBalanceDue =
+    Number.isFinite(parsedFeesPreview) &&
+    Number.isFinite(parsedPaidPreview) &&
+    parsedFeesPreview > parsedPaidPreview
+      ? Math.round(parsedFeesPreview - parsedPaidPreview)
+      : 0;
+
+  const editingBalanceDue = editingMember ? getMemberBalanceDue(editingMember) : 0;
 
   const handlePhotoChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -190,7 +233,7 @@ export function MemberFormModal({
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = 'ironpulse-members-template.csv';
+    link.download = 'gym-members-template.csv';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -205,13 +248,21 @@ export function MemberFormModal({
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
     const parsedFees = feesInput.trim() ? Number(feesInput.trim()) : Number.NaN;
+    const parsedAmountPaid = isPartialPayment
+      ? amountPaidInput.trim()
+        ? Number(amountPaidInput.trim())
+        : Number.NaN
+      : parsedFees;
     const computedRenewal = calculateRenewalFromPaidDate(paidDate, plan);
+
     const input: MemberFormInput = {
       name,
       phone,
       email: email.trim() || undefined,
       plan,
       fees: parsedFees,
+      amountPaid: parsedAmountPaid,
+      paymentMode,
       manualStatus,
       paidDate,
       renewalDate: computedRenewal,
@@ -223,13 +274,20 @@ export function MemberFormModal({
       setErrors(validation.errors);
       return;
     }
+    const cleanFees = Math.round(parsedFees);
+    const cleanAmountPaid = isPartialPayment
+      ? Math.round(parsedAmountPaid)
+      : cleanFees;
+
     onSave(
       {
         ...input,
         name: input.name.trim(),
         phone: input.phone.trim(),
         email: input.email?.trim() || undefined,
-        fees: Math.round(parsedFees),
+        fees: cleanFees,
+        amountPaid: cleanAmountPaid,
+        paymentMode,
         paidDate: input.paidDate.trim(),
         renewalDate: computedRenewal,
         avatarUrl,
@@ -270,10 +328,10 @@ export function MemberFormModal({
             </h2>
             <p className="text-xs text-slate-600 dark:text-[#8A97AB] mt-0.5">
               {editingMember
-                ? 'Update plan duration, fees, paid date, or renew membership.'
+                ? 'Update plan, fees, payment mode, balance due, or renew membership.'
                 : isCsvMode
                   ? 'Upload a spreadsheet (.csv) to bulk-add clients, fees, and paid dates.'
-                  : 'Select plan duration, fees, and paid date to track due dates automatically.'}
+                  : 'Select plan duration, fees, payment mode, and paid date.'}
             </p>
           </div>
           <button
@@ -351,7 +409,7 @@ export function MemberFormModal({
                   {csvFileName ? csvFileName : 'Drop your CSV file here'}
                 </p>
                 <p className="mt-1 text-xs text-slate-600 dark:text-[#8A97AB]">
-                  Required: Name, Phone, Fees, Paid Date (optional: Email, Plan, Status, Notes)
+                  Required: Name, Phone, Fees, Paid Date (optional: Email, Plan, Amount Paid, Payment Mode, Status, Notes)
                 </p>
 
                 <input
@@ -424,6 +482,8 @@ export function MemberFormModal({
                         const dueDate =
                           row.renewalDate ||
                           calculateRenewalFromPaidDate(row.paidDate, row.plan);
+                        const paidAmt = row.amountPaid ?? row.fees;
+                        const rowBalance = Math.max(0, Math.round(row.fees - paidAmt));
                         return (
                           <div
                             key={`${row.phone}-${idx}`}
@@ -434,7 +494,10 @@ export function MemberFormModal({
                                 {row.name}
                               </p>
                               <p className="text-[11px] text-slate-600 dark:text-[#8A97AB] truncate tabular-nums">
-                                {row.plan} · {formatCurrency(row.fees)} · {row.phone}
+                                {row.plan} · {formatCurrency(row.fees, currency)} · {row.paymentMode}
+                                {rowBalance > 0
+                                  ? ` · Bal ${formatCurrency(rowBalance, currency)}`
+                                  : ''}
                               </p>
                             </div>
                             <div className="text-right shrink-0">
@@ -475,36 +538,61 @@ export function MemberFormModal({
             </div>
           ) : (
             <>
-              {/* Quick Renewal Bar (Edit Mode Only) */}
-              {editingMember && onQuickRenew && (
-                <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-[#0D1117] p-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 text-xs font-semibold text-slate-950 dark:text-[#F3F5F7]">
-                      <CalendarPlus className="h-4 w-4 text-lime-700 dark:text-[#C8FF00]" aria-hidden="true" />
-                      <span>Quick Renew Membership</span>
-                    </div>
-                    <span className="font-mono text-xs text-slate-600 dark:text-[#8A97AB] tabular-nums">
-                      Due: {formatDisplayDate(editingMember.renewalDate)}
-                    </span>
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {[
-                      { label: '+1 Month', months: 1 },
-                      { label: '+3 Months', months: 3 },
-                      { label: '+6 Months', months: 6 },
-                      { label: '+12 Months', months: 12 },
-                    ].map((opt) => (
+              {/* Quick Renewal & Balance Settlement Bar (Edit Mode Only) */}
+              {editingMember && (onQuickRenew || (onSettleBalance && editingBalanceDue > 0)) && (
+                <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-[#0D1117] p-4 space-y-3">
+                  {onSettleBalance && editingBalanceDue > 0 && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-white/[0.08]">
+                      <div>
+                        <span className="block text-xs font-semibold text-amber-800 dark:text-amber-300">
+                          Partial Balance Pending
+                        </span>
+                        <span className="font-mono text-xs text-slate-600 dark:text-[#8A97AB] tabular-nums">
+                          Paid {formatCurrency(editingMember.amountPaid, currency)} of{' '}
+                          {formatCurrency(editingMember.fees, currency)}
+                        </span>
+                      </div>
                       <button
-                        key={opt.months}
                         type="button"
-                        onClick={() => onQuickRenew(editingMember.id, opt.months)}
-                        title={`Extend to ${formatDisplayDate(extendRenewalDate(editingMember.renewalDate, opt.months))}`}
-                        className="min-h-[42px] rounded-lg border border-slate-300 dark:border-white/[0.1] bg-white dark:bg-[#161C25] px-2.5 py-2 text-xs font-semibold text-slate-900 dark:text-[#F3F5F7] transition-colors hover:border-slate-950 hover:bg-slate-950 hover:text-[#C8FF00] dark:hover:border-[#C8FF00]/60 dark:hover:bg-[#161C25] dark:hover:text-[#C8FF00] whitespace-nowrap"
+                        onClick={() => onSettleBalance(editingMember.id)}
+                        className="min-h-[40px] rounded-lg bg-amber-600 text-white hover:bg-amber-700 dark:bg-amber-400 dark:text-[#090B0E] dark:hover:bg-amber-300 px-3.5 py-2 text-xs font-bold transition-colors whitespace-nowrap tabular-nums"
                       >
-                        {opt.label}
+                        Mark Balance Paid (+{formatCurrency(editingBalanceDue, currency)})
                       </button>
-                    ))}
-                  </div>
+                    </div>
+                  )}
+
+                  {onQuickRenew && (
+                    <div>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 text-xs font-semibold text-slate-950 dark:text-[#F3F5F7]">
+                          <CalendarPlus className="h-4 w-4 text-lime-700 dark:text-[#C8FF00]" aria-hidden="true" />
+                          <span>Quick Renew Membership</span>
+                        </div>
+                        <span className="font-mono text-xs text-slate-600 dark:text-[#8A97AB] tabular-nums">
+                          Due: {formatDisplayDate(editingMember.renewalDate)}
+                        </span>
+                      </div>
+                      <div className="mt-2.5 grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {[
+                          { label: '+1 Month', months: 1 },
+                          { label: '+3 Months', months: 3 },
+                          { label: '+6 Months', months: 6 },
+                          { label: '+12 Months', months: 12 },
+                        ].map((opt) => (
+                          <button
+                            key={opt.months}
+                            type="button"
+                            onClick={() => onQuickRenew(editingMember.id, opt.months)}
+                            title={`Extend to ${formatDisplayDate(extendRenewalDate(editingMember.renewalDate, opt.months))}`}
+                            className="min-h-[42px] rounded-lg border border-slate-300 dark:border-white/[0.1] bg-white dark:bg-[#161C25] px-2.5 py-2 text-xs font-semibold text-slate-900 dark:text-[#F3F5F7] transition-colors hover:border-slate-950 hover:bg-slate-950 hover:text-[#C8FF00] dark:hover:border-[#C8FF00]/60 dark:hover:bg-[#161C25] dark:hover:text-[#C8FF00] whitespace-nowrap"
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -697,14 +785,14 @@ export function MemberFormModal({
                       htmlFor="member-fees"
                       className="block text-xs font-medium text-slate-800 dark:text-[#CBD5E1] mb-1.5"
                     >
-                      Membership Fees (₹)
+                      Total Fees ({currencyOption.symbol.trim()})
                     </label>
                     <div className="relative">
                       <span
                         aria-hidden="true"
-                        className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 font-mono text-sm font-semibold text-slate-500 dark:text-[#8A97AB]"
+                        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 font-mono text-xs font-semibold text-slate-500 dark:text-[#8A97AB]"
                       >
-                        ₹
+                        {currencyOption.symbol.trim()}
                       </span>
                       <input
                         id="member-fees"
@@ -713,18 +801,18 @@ export function MemberFormModal({
                         inputMode="numeric"
                         min={1}
                         step={1}
-                        placeholder="e.g. 1000 or 1500"
+                        placeholder={`e.g. ${currencyOption.presets[0]} or ${currencyOption.presets[1]}`}
                         value={feesInput}
                         onChange={(e) => {
                           setFeesInput(e.target.value);
                           if (errors.fees) setErrors((prev) => ({ ...prev, fees: undefined }));
                         }}
                         aria-invalid={Boolean(errors.fees)}
-                        className="w-full min-h-[44px] rounded-lg border border-slate-300 dark:border-white/[0.12] bg-white dark:bg-[#0B0E13] pl-8 pr-3.5 py-2.5 font-mono text-sm font-semibold tabular-nums text-slate-950 dark:text-[#F3F5F7] placeholder:font-normal placeholder:text-slate-400 dark:placeholder:text-[#64748B] focus:border-slate-950 dark:focus:border-[#C8FF00] focus:outline-none"
+                        className="w-full min-h-[44px] rounded-lg border border-slate-300 dark:border-white/[0.12] bg-white dark:bg-[#0B0E13] pl-10 pr-3.5 py-2.5 font-mono text-sm font-semibold tabular-nums text-slate-950 dark:text-[#F3F5F7] placeholder:font-normal placeholder:text-slate-400 dark:placeholder:text-[#64748B] focus:border-slate-950 dark:focus:border-[#C8FF00] focus:outline-none"
                       />
                     </div>
                     <div className="mt-2 flex flex-wrap gap-1.5">
-                      {FEE_PRESETS.map((preset) => {
+                      {currencyOption.presets.map((preset) => {
                         const isMatch = Number(feesInput) === preset;
                         return (
                           <button
@@ -740,7 +828,7 @@ export function MemberFormModal({
                                 : 'border-slate-200 bg-slate-50 text-slate-700 hover:border-slate-400 dark:border-white/[0.1] dark:bg-[#0B0E13] dark:text-[#94A3B8] dark:hover:border-white/25 dark:hover:text-[#F3F5F7]'
                             }`}
                           >
-                            {formatCurrency(preset)}
+                            {formatCurrency(preset, currency)}
                           </button>
                         );
                       })}
@@ -797,6 +885,136 @@ export function MemberFormModal({
                   </div>
                 </div>
 
+                {/* Payment Mode (Cash, UPI, Card) */}
+                <div>
+                  <span className="block text-xs font-medium text-slate-800 dark:text-[#CBD5E1] mb-1.5">
+                    Payment Mode
+                  </span>
+                  <div
+                    role="group"
+                    aria-label="Payment mode"
+                    className="grid grid-cols-3 gap-1.5 rounded-lg border border-slate-200 dark:border-white/[0.08] bg-slate-100 dark:bg-[#0B0E13] p-1"
+                  >
+                    {PAYMENT_MODES.map((modeOption) => {
+                      const Icon = MODE_ICON[modeOption];
+                      const isSelected = paymentMode === modeOption;
+                      return (
+                        <button
+                          key={modeOption}
+                          type="button"
+                          onClick={() => setPaymentMode(modeOption)}
+                          aria-pressed={isSelected}
+                          className={`inline-flex min-h-[40px] items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap ${
+                            isSelected
+                              ? 'bg-slate-950 text-[#C8FF00] dark:bg-[#1D2430] dark:text-[#C8FF00]'
+                              : 'text-slate-700 hover:text-slate-950 dark:text-[#8A97AB] dark:hover:text-[#F3F5F7]'
+                          }`}
+                        >
+                          <Icon className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                          <span>{modeOption}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Partial Payment / Balance Due Tracking */}
+                <div className="rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50/70 dark:bg-[#0B0E13] p-3.5 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-slate-800 dark:text-[#CBD5E1]">
+                      Payment Status
+                    </span>
+                    <div
+                      role="group"
+                      aria-label="Payment completion"
+                      className="inline-flex rounded-lg border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#11151B] p-0.5"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsPartialPayment(false);
+                          if (errors.amountPaid) {
+                            setErrors((prev) => ({ ...prev, amountPaid: undefined }));
+                          }
+                        }}
+                        aria-pressed={!isPartialPayment}
+                        className={`min-h-[32px] rounded-md px-2.5 text-xs font-semibold transition-colors whitespace-nowrap ${
+                          !isPartialPayment
+                            ? 'bg-slate-950 text-[#C8FF00] dark:bg-[#1D2430] dark:text-[#C8FF00]'
+                            : 'text-slate-600 dark:text-[#8A97AB]'
+                        }`}
+                      >
+                        Paid in Full
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsPartialPayment(true);
+                          if (!amountPaidInput && feesInput) {
+                            setAmountPaidInput('');
+                          }
+                        }}
+                        aria-pressed={isPartialPayment}
+                        className={`min-h-[32px] rounded-md px-2.5 text-xs font-semibold transition-colors whitespace-nowrap ${
+                          isPartialPayment
+                            ? 'bg-amber-600 text-white dark:bg-amber-500/20 dark:text-amber-300'
+                            : 'text-slate-600 dark:text-[#8A97AB]'
+                        }`}
+                      >
+                        Partial Payment
+                      </button>
+                    </div>
+                  </div>
+
+                  {isPartialPayment && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                      <div>
+                        <label
+                          htmlFor="member-amount-paid"
+                          className="block text-[11px] font-medium text-slate-700 dark:text-[#94A3B8] mb-1"
+                        >
+                          Amount Paid Now ({currencyOption.symbol.trim()})
+                        </label>
+                        <input
+                          id="member-amount-paid"
+                          name="amountPaid"
+                          type="number"
+                          inputMode="numeric"
+                          min={0}
+                          step={1}
+                          placeholder="e.g. 1000"
+                          value={amountPaidInput}
+                          onChange={(e) => {
+                            setAmountPaidInput(e.target.value);
+                            if (errors.amountPaid) {
+                              setErrors((prev) => ({ ...prev, amountPaid: undefined }));
+                            }
+                          }}
+                          aria-invalid={Boolean(errors.amountPaid)}
+                          className="w-full min-h-[42px] rounded-lg border border-slate-300 dark:border-white/[0.12] bg-white dark:bg-[#11151B] px-3 py-2 font-mono text-sm font-semibold tabular-nums text-slate-950 dark:text-[#F3F5F7] focus:border-slate-950 dark:focus:border-[#C8FF00] focus:outline-none"
+                        />
+                        {errors.amountPaid && (
+                          <p role="alert" className="mt-1 text-xs font-medium text-rose-700 dark:text-rose-400">
+                            {errors.amountPaid}
+                          </p>
+                        )}
+                      </div>
+
+                      <div
+                        data-testid="live-balance-due"
+                        className="flex flex-col justify-center rounded-lg border border-amber-300/70 dark:border-amber-500/30 bg-amber-50 dark:bg-amber-500/10 px-3.5 py-2"
+                      >
+                        <span className="text-[11px] font-medium text-amber-800 dark:text-amber-300">
+                          Remaining Balance Due
+                        </span>
+                        <span className="font-mono text-lg font-bold tabular-nums text-amber-900 dark:text-amber-200">
+                          {formatCurrency(liveBalanceDue, currency)}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
                 {/* Account State (Active vs Paused) */}
                 <div>
                   <span className="block text-xs font-medium text-slate-800 dark:text-[#CBD5E1] mb-1.5">
@@ -828,9 +1046,6 @@ export function MemberFormModal({
                       Paused / On Hold
                     </button>
                   </div>
-                  <p className="mt-1.5 text-[11px] text-slate-600 dark:text-[#7E8B9E]">
-                    Due date is auto-calculated from Paid Date + {plan}. Accounts flag Expiring Soon within 7 days.
-                  </p>
                 </div>
 
                 {/* Optional Notes */}

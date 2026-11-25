@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Check, Copy, ExternalLink, Mail, MessageCircle, X } from 'lucide-react';
+import { GymBranding } from '../utils/branding';
 import {
   Member,
   buildMailtoUrl,
   buildWhatsAppUrl,
   computeMemberStatus,
   formatDisplayDate,
+  getMemberBalanceDue,
   getMessageTemplates,
   getStatusLabel,
 } from '../utils/memberLogic';
@@ -13,6 +15,7 @@ import {
 interface MessageComposerModalProps {
   member: Member | null;
   initialChannel: 'whatsapp' | 'email';
+  branding: GymBranding;
   onClose: () => void;
   onMarkMessaged: (memberId: string) => void;
 }
@@ -20,6 +23,7 @@ interface MessageComposerModalProps {
 export function MessageComposerModal({
   member,
   initialChannel,
+  branding,
   onClose,
   onMarkMessaged,
 }: MessageComposerModalProps) {
@@ -32,13 +36,18 @@ export function MessageComposerModal({
   useEffect(() => {
     if (!member) return;
     const status = computeMemberStatus(member);
-    const templates = getMessageTemplates(member, status);
-    const defaultTemplate =
-      status === 'paused'
-        ? templates[2]
+    const templates = getMessageTemplates(member, status, new Date(), {
+      gymName: branding.gymName,
+      currency: branding.currency,
+    });
+    const hasBalance = getMemberBalanceDue(member) > 0;
+    const defaultTemplate = hasBalance
+      ? templates[0]
+      : status === 'paused'
+        ? templates.find((t) => t.id === 'welcome') ?? templates[0]
         : status === 'active'
-          ? templates[1]
-          : templates[0];
+          ? templates.find((t) => t.id === 'checkin') ?? templates[0]
+          : templates.find((t) => t.id === 'renewal') ?? templates[0];
 
     const memberHasEmail = Boolean(member.email?.trim());
     setChannel(initialChannel === 'email' && !memberHasEmail ? 'whatsapp' : initialChannel);
@@ -46,7 +55,7 @@ export function MessageComposerModal({
     setSubject(defaultTemplate.subject);
     setBody(defaultTemplate.body);
     setCopied(false);
-  }, [member, initialChannel]);
+  }, [member, initialChannel, branding.gymName, branding.currency]);
 
   useEffect(() => {
     if (!member) return;
@@ -63,7 +72,10 @@ export function MessageComposerModal({
 
   const hasEmail = Boolean(member.email?.trim());
   const status = computeMemberStatus(member);
-  const templates = getMessageTemplates(member, status);
+  const templates = getMessageTemplates(member, status, new Date(), {
+    gymName: branding.gymName,
+    currency: branding.currency,
+  });
   const whatsappUrl = buildWhatsAppUrl(member.phone, body);
   const mailtoUrl = hasEmail
     ? buildMailtoUrl(member.email ?? '', subject, body)

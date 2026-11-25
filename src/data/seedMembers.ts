@@ -15,8 +15,8 @@ function offsetIsoDate(daysOffset: number, baseDate: Date = new Date()): string 
 
 /**
  * Generates deterministic, realistic initial gym members anchored to the current date
- * so Active, Expiring Soon, Expired, and Paused views are immediately useful on first load,
- * showcasing 1/2/3/6/12 Month plans, custom fees (e.g. ₹1,000 and ₹1,500), and optional emails.
+ * showcasing 1/2/3/6/12 Month plans, custom fees, Cash/UPI/Card payment modes,
+ * current-month collections, partial-payment balances, and optional emails.
  */
 export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
   const makeDates = (daysUntilDue: number, planMonths: number) => {
@@ -34,7 +34,13 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
   const m107 = makeDates(92, 12);
   const m108 = makeDates(21, 3);
   const m109 = makeDates(0, 1);
-  const m110 = makeDates(26, 2);
+  // Make sure several active members have paidDate in the current calendar month
+  const paidThisMonth1 = offsetIsoDate(-3, referenceDate);
+  const dueThisMonth1 = addMonthsToIsoDate(paidThisMonth1, 2);
+  const paidThisMonth2 = offsetIsoDate(-6, referenceDate);
+  const dueThisMonth2 = addMonthsToIsoDate(paidThisMonth2, 1);
+  const paidThisMonth3 = offsetIsoDate(-2, referenceDate);
+  const dueThisMonth3 = addMonthsToIsoDate(paidThisMonth3, 6);
 
   return [
     {
@@ -44,6 +50,8 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
       email: 'marcus.reyes@ironmail.co',
       plan: '12 Months',
       fees: 12000,
+      amountPaid: 12000,
+      paymentMode: 'Card',
       manualStatus: 'active',
       paidDate: m101.paidDate,
       renewalDate: m101.renewalDate,
@@ -58,6 +66,8 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
       email: 'priya.nair@gmail.com',
       plan: '3 Months',
       fees: 4000,
+      amountPaid: 2500,
+      paymentMode: 'UPI',
       manualStatus: 'active',
       paidDate: m102.paidDate,
       renewalDate: m102.renewalDate,
@@ -72,6 +82,8 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
       email: 'darius.cole@outlook.com',
       plan: '1 Month',
       fees: 1500,
+      amountPaid: 1000,
+      paymentMode: 'Cash',
       manualStatus: 'active',
       paidDate: m103.paidDate,
       renewalDate: m103.renewalDate,
@@ -86,9 +98,11 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
       email: 'hannah.lind@proton.me',
       plan: '6 Months',
       fees: 7000,
+      amountPaid: 7000,
+      paymentMode: 'Card',
       manualStatus: 'active',
-      paidDate: m104.paidDate,
-      renewalDate: m104.renewalDate,
+      paidDate: paidThisMonth3,
+      renewalDate: dueThisMonth3,
       joinedDate: offsetIsoDate(-217, referenceDate),
       notes: 'Marathon prep block',
     },
@@ -98,10 +112,12 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
       phone: '+1 323 555 0118',
       plan: '2 Months',
       fees: 2800,
+      amountPaid: 2000,
+      paymentMode: 'UPI',
       manualStatus: 'active',
-      paidDate: m105.paidDate,
-      renewalDate: m105.renewalDate,
-      joinedDate: m105.paidDate,
+      paidDate: paidThisMonth1,
+      renewalDate: dueThisMonth1,
+      joinedDate: paidThisMonth1,
       notes: 'Evening conditioning classes',
     },
     {
@@ -111,6 +127,8 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
       email: 'chloe.brooks@gmail.com',
       plan: '1 Month',
       fees: 1000,
+      amountPaid: 1000,
+      paymentMode: 'Cash',
       manualStatus: 'active',
       paidDate: m106.paidDate,
       renewalDate: m106.renewalDate,
@@ -125,6 +143,8 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
       email: 'kenji.takahashi@fastmail.com',
       plan: '12 Months',
       fees: 14000,
+      amountPaid: 14000,
+      paymentMode: 'Card',
       manualStatus: 'active',
       paidDate: m107.paidDate,
       renewalDate: m107.renewalDate,
@@ -138,6 +158,8 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
       email: 'nadia.almansoor@gmail.com',
       plan: '3 Months',
       fees: 3500,
+      amountPaid: 3500,
+      paymentMode: 'UPI',
       manualStatus: 'paused',
       paidDate: m108.paidDate,
       renewalDate: m108.renewalDate,
@@ -150,6 +172,8 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
       phone: '+1 415 555 0126',
       plan: '1 Month',
       fees: 1500,
+      amountPaid: 1500,
+      paymentMode: 'UPI',
       manualStatus: 'active',
       paidDate: m109.paidDate,
       renewalDate: m109.renewalDate,
@@ -162,12 +186,14 @@ export function createSeedMembers(referenceDate: Date = new Date()): Member[] {
       name: 'Sienna Morales',
       phone: '+1 323 555 0180',
       email: 'sienna.morales@gmail.com',
-      plan: '2 Months',
-      fees: 2500,
+      plan: '1 Month',
+      fees: 1500,
+      amountPaid: 1500,
+      paymentMode: 'Cash',
       manualStatus: 'active',
-      paidDate: m110.paidDate,
-      renewalDate: m110.renewalDate,
-      joinedDate: m110.paidDate,
+      paidDate: paidThisMonth2,
+      renewalDate: dueThisMonth2,
+      joinedDate: paidThisMonth2,
       notes: 'Post-rehab mobility & strength',
     },
   ];

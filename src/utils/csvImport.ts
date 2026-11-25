@@ -5,6 +5,7 @@ import {
   calculateRenewalFromPaidDate,
   getPlanMonths,
   normalizeMembershipPlan,
+  normalizePaymentMode,
   parseIsoDate,
   toIsoDateString,
   validateMemberInput,
@@ -86,19 +87,16 @@ export function normalizeCsvDate(rawDate: string): string {
   const trimmed = rawDate.trim();
   if (!trimmed) return '';
 
-  // Strict YYYY-MM-DD
   if (parseIsoDate(trimmed)) {
     return trimmed;
   }
 
-  // YYYY/MM/DD
   const ymdSlash = trimmed.match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
   if (ymdSlash) {
     const candidate = `${ymdSlash[1]}-${ymdSlash[2].padStart(2, '0')}-${ymdSlash[3].padStart(2, '0')}`;
     return parseIsoDate(candidate) ? candidate : '';
   }
 
-  // MM/DD/YYYY or M/D/YYYY
   const mdySlash = trimmed.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
   if (mdySlash) {
     const candidate = `${mdySlash[3]}-${mdySlash[1].padStart(2, '0')}-${mdySlash[2].padStart(2, '0')}`;
@@ -112,7 +110,7 @@ export function normalizeCsvDate(rawDate: string): string {
  * Parses numeric fee cells such as "1500", "₹1,500", "Rs 1000", or "$50".
  */
 export function parseCsvFee(rawFee: string): number {
-  const cleaned = rawFee.replace(/[₹$€£,\s]|rs\.?/gi, '').trim();
+  const cleaned = rawFee.replace(/[₹$€£,\s]|rs\.?|aed/gi, '').trim();
   if (!cleaned || !/^\d+(\.\d+)?$/.test(cleaned)) {
     return Number.NaN;
   }
@@ -143,8 +141,8 @@ function findColumnIndex(headers: string[], aliases: string[]): number {
 
 /**
  * Parses and validates a gym member CSV string into ready-to-import members and
- * row-level error diagnostics. Supports optional Email, per-member Fees, and
- * Paid Date (or legacy Due Date / Renewal Date).
+ * row-level error diagnostics. Supports optional Email, custom Fees, Amount Paid,
+ * Payment Mode (Cash/UPI/Card), and Paid Date (or Due Date).
  */
 export function parseMembersCsv(rawCsv: string): CsvParseResult {
   const matrix = parseCsvMatrix(rawCsv);
@@ -188,8 +186,21 @@ export function parseMembersCsv(rawCsv: string): CsvParseResult {
     'price',
     'monthly fee',
     'membership fee',
-    'paid amount',
+    'total fees',
     'dues',
+  ]);
+  const amountPaidIdx = findColumnIndex(headerRow, [
+    'amount paid',
+    'paid amount',
+    'received',
+    'collected',
+  ]);
+  const paymentModeIdx = findColumnIndex(headerRow, [
+    'payment mode',
+    'mode',
+    'payment method',
+    'method',
+    'paid via',
   ]);
   const paidDateIdx = findColumnIndex(headerRow, [
     'paid date',
@@ -250,6 +261,8 @@ export function parseMembersCsv(rawCsv: string): CsvParseResult {
     const rawEmail = emailIdx !== -1 ? row[emailIdx] ?? '' : '';
     const rawPlan = planIdx !== -1 ? row[planIdx] ?? '' : '';
     const rawFees = row[feesIdx] ?? '';
+    const rawAmountPaid = amountPaidIdx !== -1 ? row[amountPaidIdx] ?? '' : '';
+    const rawPaymentMode = paymentModeIdx !== -1 ? row[paymentModeIdx] ?? '' : '';
     const rawPaidDate = paidDateIdx !== -1 ? row[paidDateIdx] ?? '' : '';
     const rawDueDate = dueDateIdx !== -1 ? row[dueDateIdx] ?? '' : '';
     const rawStatus = statusIdx !== -1 ? row[statusIdx] ?? '' : '';
@@ -257,6 +270,8 @@ export function parseMembersCsv(rawCsv: string): CsvParseResult {
 
     const plan = normalizeMembershipPlan(rawPlan);
     const fees = parseCsvFee(rawFees);
+    const amountPaid = rawAmountPaid.trim() ? parseCsvFee(rawAmountPaid) : undefined;
+    const paymentMode = normalizePaymentMode(rawPaymentMode);
 
     let paidDate = normalizeCsvDate(rawPaidDate);
     let renewalDate = normalizeCsvDate(rawDueDate);
@@ -273,6 +288,8 @@ export function parseMembersCsv(rawCsv: string): CsvParseResult {
       email: rawEmail.trim() || undefined,
       plan,
       fees,
+      amountPaid,
+      paymentMode,
       manualStatus: normalizeManualStatus(rawStatus),
       paidDate,
       renewalDate: renewalDate || undefined,
@@ -312,9 +329,9 @@ export function buildSampleMembersCsv(referenceDate: Date = new Date()): string 
   };
 
   return [
-    'Name,Phone,Email,Plan,Fees,Paid Date,Status,Notes',
-    `Liam Carter,+91 98765 11223,liam.carter@fitmail.io,1 Month,1000,${offset(-12)},Active,Morning strength block`,
-    `Aisha Mensah,+91 98111 44556,,3 Months,4000,${offset(-86)},Active,"Prefers 7 AM sessions, barbell focus"`,
-    `Devon Brooks,+91 99000 77889,devon.brooks@outlook.com,1 Month,1500,${offset(-33)},Active,Renewal follow-up`,
+    'Name,Phone,Email,Plan,Fees,Amount Paid,Payment Mode,Paid Date,Status,Notes',
+    `Liam Carter,+91 98765 11223,liam.carter@fitmail.io,1 Month,1000,1000,UPI,${offset(-12)},Active,Morning strength block`,
+    `Aisha Mensah,+91 98111 44556,,3 Months,4000,2500,Cash,${offset(-8)},Active,"Prefers 7 AM sessions, balance pending"`,
+    `Devon Brooks,+91 99000 77889,devon.brooks@outlook.com,1 Month,1500,1500,Card,${offset(-33)},Active,Renewal follow-up`,
   ].join('\n');
 }

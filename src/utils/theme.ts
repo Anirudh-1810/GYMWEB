@@ -1,3 +1,5 @@
+import { getThemeColorHex } from './pwa';
+
 export type ThemeMode = 'dark' | 'light';
 
 export const THEME_STORAGE_KEY = 'ironpulse_theme_v1';
@@ -26,4 +28,9 @@ export function applyThemeToDocument(theme: ThemeMode): void {
     root.classList.remove('dark');
   }
   root.style.colorScheme = theme;
+
+  const themeColorMeta = document.querySelector('meta[name="theme-color"]');
+  if (themeColorMeta) {
+    themeColorMeta.setAttribute('content', getThemeColorHex(theme));
+  }
 }

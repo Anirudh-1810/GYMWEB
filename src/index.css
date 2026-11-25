@@ -49,7 +49,10 @@
   }
 }
 
-/* Safe-area bottom padding helper for mobile bottom nav */
+/* Safe-area padding helpers for standalone mobile mode */
+.pt-safe {
+  padding-top: env(safe-area-inset-top);
+}
 .pb-safe {
   padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
 }

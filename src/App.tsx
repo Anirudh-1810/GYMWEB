@@ -5,24 +5,39 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpDown, ChevronDown, Moon, Plus, Search, Sun, UserPlus, X } from 'lucide-react';
-import { GymHero, GymLogoMark } from './components/GymHero';
+import { BrandingSettingsModal } from './components/BrandingSettingsModal';
+import { BrandLogoAvatar, GymHero } from './components/GymHero';
 import { MemberCard } from './components/MemberCard';
 import { MemberFormModal } from './components/MemberFormModal';
 import { MessageComposerModal } from './components/MessageComposerModal';
 import { MetricsStrip } from './components/MetricsStrip';
 import { MobileBottomNav } from './components/MobileBottomNav';
+import { OfflineIndicator } from './components/OfflineIndicator';
+import { QuickPayModal } from './components/QuickPayModal';
+import { RevenueSummary } from './components/RevenueSummary';
 import { createSeedMembers } from './data/seedMembers';
+import {
+  BRANDING_STORAGE_KEY,
+  DEFAULT_BRANDING,
+  GymBranding,
+  resolveGymBranding,
+  splitBrandWordmark,
+} from './utils/branding';
 import {
   Member,
   MemberFormInput,
+  PaymentMode,
   SortOption,
   StatusFilter,
   calculateRenewalFromPaidDate,
   computeDashboardMetrics,
+  computeRevenueSummary,
   extendRenewalDate,
   filterAndSortMembers,
+  formatCurrency,
   formatDisplayDate,
   migrateStoredMember,
+  recordQuickPayment,
   toIsoDateString,
 } from './utils/memberLogic';
 import {
@@ -64,6 +79,16 @@ function loadInitialMembers(): Member[] {
   return seedMembers;
 }
 
+function loadInitialBranding(): GymBranding {
+  try {
+    const raw = window.localStorage.getItem(BRANDING_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_BRANDING };
+    return resolveGymBranding(JSON.parse(raw));
+  } catch {
+    return { ...DEFAULT_BRANDING };
+  }
+}
+
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(() => {
     try {
@@ -72,14 +97,18 @@ export default function App() {
       return 'dark';
     }
   });
+  const [branding, setBranding] = useState<GymBranding>(loadInitialBranding);
   const [members, setMembers] = useState<Member[]>(loadInitialMembers);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [balanceOnly, setBalanceOnly] = useState(false);
+  const [paymentModeFilter, setPaymentModeFilter] = useState<PaymentMode | 'all'>('all');
   const [sortBy, setSortBy] = useState<SortOption>('renewal_soonest');
 
   const [isFormOpen, setIsFormOpen] = useState(false);
-  const [formInitialMode, setFormInitialMode] = useState<'single' | 'csv'>('single');
   const [editingMember, setEditingMember] = useState<Member | null>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [quickPayMember, setQuickPayMember] = useState<Member | null>(null);
 
   const [messagingState, setMessagingState] = useState<{
     member: Member;
@@ -99,6 +128,22 @@ export default function App() {
     }
   }, [theme]);
 
+  // Persist custom gym branding and sync document & iOS home-screen title
+  useEffect(() => {
+    document.title = `${branding.gymName} — Gym Client Dashboard`;
+    const appleTitleMeta = document.querySelector(
+      'meta[name="apple-mobile-web-app-title"]'
+    );
+    if (appleTitleMeta) {
+      appleTitleMeta.setAttribute('content', branding.gymName);
+    }
+    try {
+      window.localStorage.setItem(BRANDING_STORAGE_KEY, JSON.stringify(branding));
+    } catch {
+      // Ignore storage quota issues in restricted environments
+    }
+  }, [branding]);
+
   // Persist roster updates to localStorage
   useEffect(() => {
     try {
@@ -115,6 +160,8 @@ export default function App() {
         event.key === '/' &&
         !isFormOpen &&
         !messagingState &&
+        !isSettingsOpen &&
+        !quickPayMember &&
         document.activeElement?.tagName !== 'INPUT' &&
         document.activeElement?.tagName !== 'TEXTAREA' &&
         document.activeElement?.tagName !== 'SELECT'
@@ -125,7 +172,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleGlobalKey);
     return () => window.removeEventListener('keydown', handleGlobalKey);
-  }, [isFormOpen, messagingState]);
+  }, [isFormOpen, messagingState, isSettingsOpen, quickPayMember]);
 
   const showToast = (message: string) => {
     setToastMessage(message);
@@ -138,6 +185,7 @@ export default function App() {
   }, [toastMessage]);
 
   const metrics = useMemo(() => computeDashboardMetrics(members), [members]);
+  const revenueSummary = useMemo(() => computeRevenueSummary(members), [members]);
 
   const visibleMembers = useMemo(
     () =>
@@ -145,8 +193,10 @@ export default function App() {
         query: searchQuery,
         statusFilter,
         sortBy,
+        balanceOnly,
+        paymentModeFilter,
       }),
-    [members, searchQuery, statusFilter, sortBy]
+    [members, searchQuery, statusFilter, sortBy, balanceOnly, paymentModeFilter]
   );
 
   const todayDisplay = useMemo(
@@ -160,27 +210,40 @@ export default function App() {
     []
   );
 
-  const openAddModal = () => {
-    setEditingMember(null);
-    setFormInitialMode('single');
-    setIsFormOpen(true);
+  const headerWordmark = useMemo(
+    () => splitBrandWordmark(branding.gymName),
+    [branding.gymName]
+  );
+
+  const hasActiveFilters = Boolean(
+    searchQuery.trim() ||
+      statusFilter !== 'all' ||
+      balanceOnly ||
+      paymentModeFilter !== 'all'
+  );
+
+  const resetAllFilters = () => {
+    setSearchQuery('');
+    setStatusFilter('all');
+    setBalanceOnly(false);
+    setPaymentModeFilter('all');
   };
 
-  const openCsvModal = () => {
+  const openAddModal = () => {
     setEditingMember(null);
-    setFormInitialMode('csv');
     setIsFormOpen(true);
   };
 
   const openManageModal = (member: Member) => {
     setEditingMember(member);
-    setFormInitialMode('single');
     setIsFormOpen(true);
   };
 
   const handleSaveMember = (input: MemberFormInput, editingId: string | null) => {
     const computedRenewal =
       input.renewalDate || calculateRenewalFromPaidDate(input.paidDate, input.plan);
+    const resolvedAmountPaid =
+      input.amountPaid !== undefined ? input.amountPaid : input.fees;
 
     if (editingId) {
       setMembers((prev) =>
@@ -193,6 +256,8 @@ export default function App() {
                 email: input.email,
                 plan: input.plan,
                 fees: input.fees,
+                amountPaid: resolvedAmountPaid,
+                paymentMode: input.paymentMode,
                 manualStatus: input.manualStatus,
                 paidDate: input.paidDate,
                 renewalDate: computedRenewal,
@@ -211,6 +276,8 @@ export default function App() {
         email: input.email,
         plan: input.plan,
         fees: input.fees,
+        amountPaid: resolvedAmountPaid,
+        paymentMode: input.paymentMode,
         manualStatus: input.manualStatus,
         paidDate: input.paidDate,
         renewalDate: computedRenewal,
@@ -219,49 +286,23 @@ export default function App() {
         notes: input.notes,
       };
       setMembers((prev) => [newMember, ...prev]);
-      if (statusFilter !== 'all') {
-        setStatusFilter('all');
-      }
-      if (searchQuery.trim()) {
-        setSearchQuery('');
-      }
+      resetAllFilters();
       showToast(`Added ${newMember.name} to your roster`);
     }
     setIsFormOpen(false);
     setEditingMember(null);
   };
 
-  const handleBulkImport = (inputs: MemberFormInput[]) => {
-    if (inputs.length === 0) return;
-    const todayIso = toIsoDateString(new Date());
-    const baseTimestamp = Date.now();
-    const createdMembers: Member[] = inputs.map((input, idx) => ({
-      id: `mem-${baseTimestamp}-${idx}`,
-      name: input.name,
-      phone: input.phone,
-      email: input.email,
-      plan: input.plan,
-      fees: input.fees,
-      manualStatus: input.manualStatus,
-      paidDate: input.paidDate,
-      renewalDate:
-        input.renewalDate || calculateRenewalFromPaidDate(input.paidDate, input.plan),
-      joinedDate: input.paidDate || todayIso,
-      avatarUrl: input.avatarUrl,
-      notes: input.notes,
-    }));
-
-    setMembers((prev) => [...createdMembers, ...prev]);
-    if (statusFilter !== 'all') {
-      setStatusFilter('all');
-    }
-    if (searchQuery.trim()) {
-      setSearchQuery('');
-    }
-    setIsFormOpen(false);
-    setEditingMember(null);
+  const handleQuickPay = (memberId: string, paymentMode: PaymentMode) => {
+    const target = members.find((m) => m.id === memberId);
+    if (!target) return;
+    const updated = recordQuickPayment(target, paymentMode);
+    setMembers((prev) =>
+      prev.map((m) => (m.id === memberId ? updated : m))
+    );
+    setQuickPayMember(null);
     showToast(
-      `Imported ${createdMembers.length} ${createdMembers.length === 1 ? 'member' : 'members'} to your roster`
+      `Marked ${target.name} paid via ${paymentMode} · Next due ${formatDisplayDate(updated.renewalDate)}`
     );
   };
 
@@ -277,6 +318,7 @@ export default function App() {
               ...m,
               paidDate: todayIso,
               renewalDate: nextDate,
+              amountPaid: m.fees,
               manualStatus: 'active',
             }
           : m
@@ -285,6 +327,24 @@ export default function App() {
     setIsFormOpen(false);
     setEditingMember(null);
     showToast(`Renewed ${target.name} through ${formatDisplayDate(nextDate)}`);
+  };
+
+  const handleSettleBalance = (memberId: string) => {
+    const target = members.find((m) => m.id === memberId);
+    if (!target) return;
+    const todayIso = toIsoDateString(new Date());
+    setMembers((prev) =>
+      prev.map((m) =>
+        m.id === memberId
+          ? { ...m, amountPaid: m.fees, paidDate: todayIso }
+          : m
+      )
+    );
+    setIsFormOpen(false);
+    setEditingMember(null);
+    showToast(
+      `Balance cleared for ${target.name} (${formatCurrency(target.fees, branding.currency)} paid)`
+    );
   };
 
   const handleDeleteMember = (memberId: string) => {
@@ -304,6 +364,12 @@ export default function App() {
     );
   };
 
+  const handleSaveBranding = (nextBranding: GymBranding) => {
+    setBranding(nextBranding);
+    setIsSettingsOpen(false);
+    showToast(`Saved branding for ${nextBranding.gymName}`);
+  };
+
   const filterTabs: Array<{ id: StatusFilter; label: string; count: number }> = [
     { id: 'all', label: 'All', count: metrics.total },
     { id: 'active', label: 'Active', count: metrics.active },
@@ -319,20 +385,29 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#F4F6F8] text-slate-950 dark:bg-[#090B0E] dark:text-[#F3F5F7] flex flex-col transition-colors duration-150">
       {/* Top Navigation Bar (Strict 3-Zone Contract, compact 52px on mobile) */}
-      <header className="sticky top-0 z-30 border-b border-slate-200 dark:border-white/[0.08] bg-white/95 dark:bg-[#090B0E]/92 backdrop-blur-md">
+      <header className="sticky top-0 z-30 pt-safe border-b border-slate-200 dark:border-white/[0.08] bg-white/95 dark:bg-[#090B0E]/92 backdrop-blur-md">
         <div className="mx-auto flex h-[52px] md:h-16 max-w-7xl items-center justify-between gap-4 sm:gap-8 px-4 sm:px-6 lg:px-8">
           {/* Zone 1: Single-element Brand Wordmark */}
           <a
             href="#top"
             onClick={(e) => {
               e.preventDefault();
-              setStatusFilter('all');
-              setSearchQuery('');
+              resetAllFilters();
               window.scrollTo({ top: 0, behavior: 'smooth' });
             }}
-            className="font-display text-2xl font-bold tracking-wider text-slate-950 dark:text-[#F3F5F7] whitespace-nowrap shrink-0"
+            className="font-display text-xl sm:text-2xl font-bold tracking-wider text-slate-950 dark:text-[#F3F5F7] whitespace-nowrap shrink-0 max-w-[180px] sm:max-w-none truncate"
           >
-            IRON<span className="text-lime-700 dark:text-[#C8FF00]">PULSE</span>
+            {headerWordmark.lead}
+            {headerWordmark.accent ? (
+              <>
+                {headerWordmark.lead === 'IRON' && headerWordmark.accent === 'PULSE'
+                  ? ''
+                  : ' '}
+                <span className="text-lime-700 dark:text-[#C8FF00]">
+                  {headerWordmark.accent}
+                </span>
+              </>
+            ) : null}
           </a>
 
           {/* Zone 2: Clean single-line nav links */}
@@ -348,12 +423,15 @@ export default function App() {
                 { id: 'expired', label: 'Expired' },
               ] as const
             ).map((item) => {
-              const isCurrent = statusFilter === item.id;
+              const isCurrent = statusFilter === item.id && !balanceOnly;
               return (
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => setStatusFilter(item.id)}
+                  onClick={() => {
+                    setStatusFilter(item.id);
+                    setBalanceOnly(false);
+                  }}
                   className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 ${
                     isCurrent
                       ? 'border-slate-950 text-slate-950 font-semibold dark:border-[#C8FF00] dark:text-[#F3F5F7]'
@@ -400,29 +478,43 @@ export default function App() {
         id="top"
         className="mx-auto w-full max-w-7xl flex-1 px-4 sm:px-6 lg:px-8 pt-4 sm:pt-7 pb-10"
       >
-        {/* Gym Hero Section: Logo, Name & Overview */}
+        {/* Gym Hero Section: Logo, Name & Settings/Install Controls */}
         <GymHero
+          branding={branding}
           todayDisplay={todayDisplay}
-          onOpenCsvImport={openCsvModal}
+          onOpenSettings={() => setIsSettingsOpen(true)}
         />
 
         {/* KPI Overview Strip */}
         <MetricsStrip
           metrics={metrics}
           activeFilter={statusFilter}
-          onSelectFilter={setStatusFilter}
+          onSelectFilter={(filter) => {
+            setStatusFilter(filter);
+            if (filter === 'all') setBalanceOnly(false);
+          }}
+        />
+
+        {/* Revenue & Fee Summary + Plan & Payment Mode Breakdown */}
+        <RevenueSummary
+          summary={revenueSummary}
+          currency={branding.currency}
+          balanceOnly={balanceOnly}
+          paymentModeFilter={paymentModeFilter}
+          onToggleBalanceOnly={() => setBalanceOnly((prev) => !prev)}
+          onSelectPaymentMode={setPaymentModeFilter}
         />
 
         {/* Search, Filter Tabs & Sort Toolbar */}
         <section
           aria-label="Search and filter members"
-          className="mt-4 sm:mt-6 flex flex-col gap-2.5 sm:gap-3 lg:flex-row lg:items-center lg:justify-between"
+          className="mt-5 sm:mt-6 flex flex-col gap-2.5 sm:gap-3 lg:flex-row lg:items-center lg:justify-between"
         >
           {/* Search Input */}
           <div className="flex items-center gap-2 flex-1 lg:max-w-md">
             <div className="relative flex-1 min-w-0">
               <label htmlFor="client-search" className="sr-only">
-                Search clients by name, plan, email, or phone
+                Search clients by name, plan, email, phone, payment mode, or fees
               </label>
               <Search
                 className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500 dark:text-[#7E8B9E]"
@@ -434,7 +526,7 @@ export default function App() {
                 type="search"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search by name, phone, plan, or fees..."
+                placeholder="Search by name, phone, plan, mode, or fees..."
                 className="w-full min-h-[44px] rounded-xl border border-slate-300 dark:border-white/[0.1] bg-white dark:bg-[#11151B] pl-10 pr-10 py-2.5 text-sm text-slate-950 dark:text-[#F3F5F7] placeholder:text-slate-500 dark:placeholder:text-[#64748B] transition-colors focus:border-slate-950 dark:focus:border-[#C8FF00] focus:outline-none"
               />
               {searchQuery && (
@@ -507,7 +599,7 @@ export default function App() {
                   Sort: Name (A–Z)
                 </option>
                 <option value="newest_added" className="bg-white text-slate-950 dark:bg-[#11151B] dark:text-[#F3F5F7]">
-                  Sort: Recently Joined
+                  Sort: Recently Paid
                 </option>
               </select>
               <ChevronDown
@@ -518,20 +610,41 @@ export default function App() {
           </div>
         </section>
 
-        {/* Results Count Caption */}
-        <div className="mt-4 sm:mt-5 mb-3 flex items-center justify-between text-xs text-slate-600 dark:text-[#7E8B9E]">
-          <span className="tabular-nums">
-            Showing <strong className="font-semibold text-slate-950 dark:text-[#CBD5E1]">{visibleMembers.length}</strong> of{' '}
-            <strong className="font-semibold text-slate-950 dark:text-[#CBD5E1]">{members.length}</strong>{' '}
-            {members.length === 1 ? 'client' : 'clients'}
-          </span>
-          {(searchQuery || statusFilter !== 'all') && (
+        {/* Results Count Caption & Active Filter Readout */}
+        <div className="mt-4 sm:mt-5 mb-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-[#7E8B9E]">
+          <div className="flex flex-wrap items-center gap-2 tabular-nums">
+            <span>
+              Showing{' '}
+              <strong className="font-semibold text-slate-950 dark:text-[#CBD5E1]">
+                {visibleMembers.length}
+              </strong>{' '}
+              of{' '}
+              <strong className="font-semibold text-slate-950 dark:text-[#CBD5E1]">
+                {members.length}
+              </strong>{' '}
+              {members.length === 1 ? 'client' : 'clients'}
+            </span>
+            {balanceOnly && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-semibold text-amber-800 dark:text-amber-300">
+                  Balances due only
+                </span>
+              </>
+            )}
+            {paymentModeFilter !== 'all' && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span className="font-semibold text-lime-800 dark:text-[#C8FF00]">
+                  Mode: {paymentModeFilter}
+                </span>
+              </>
+            )}
+          </div>
+          {hasActiveFilters && (
             <button
               type="button"
-              onClick={() => {
-                setSearchQuery('');
-                setStatusFilter('all');
-              }}
+              onClick={resetAllFilters}
               className="font-semibold text-lime-800 dark:text-[#C8FF00] hover:underline whitespace-nowrap"
             >
               Reset filters
@@ -547,7 +660,7 @@ export default function App() {
               No Clients Yet
             </h2>
             <p className="mt-1.5 max-w-sm text-sm text-slate-600 dark:text-[#8A97AB]">
-              Add your first gym member to track renewal dates and send quick WhatsApp or email reminders.
+              Add your first gym member to track fees, renewal dates, and send quick WhatsApp or email reminders.
             </p>
             <button
               type="button"
@@ -564,20 +677,11 @@ export default function App() {
               No Matching Clients
             </h2>
             <p className="mt-1.5 max-w-md text-sm text-slate-600 dark:text-[#8A97AB]">
-              No members match{' '}
-              {searchQuery ? (
-                <span className="font-medium text-slate-950 dark:text-[#F3F5F7]">"{searchQuery}"</span>
-              ) : (
-                'the selected status filter'
-              )}
-              . Try a different search or reset your filters.
+              No members match your current search or active filters. Try adjusting them or reset filters below.
             </p>
             <button
               type="button"
-              onClick={() => {
-                setSearchQuery('');
-                setStatusFilter('all');
-              }}
+              onClick={resetAllFilters}
               className="mt-5 inline-flex min-h-[44px] items-center rounded-lg border border-slate-300 dark:border-white/[0.12] bg-white dark:bg-transparent px-4 py-2 text-sm font-semibold text-slate-900 hover:border-slate-950 dark:text-[#F3F5F7] dark:hover:border-[#C8FF00]/60 dark:hover:text-[#C8FF00] transition-colors"
             >
               Clear Filters
@@ -593,10 +697,13 @@ export default function App() {
               <MemberCard
                 key={member.id}
                 member={member}
+                currency={branding.currency}
                 onMessage={(target, channel) =>
                   setMessagingState({ member: target, channel })
                 }
                 onManage={openManageModal}
+                onQuickPay={setQuickPayMember}
+                onSettleBalance={handleSettleBalance}
               />
             ))}
           </section>
@@ -606,10 +713,30 @@ export default function App() {
       {/* Footer */}
       <footer className="border-t border-slate-200 dark:border-white/[0.08] bg-white/80 dark:bg-[#0B0E13] pb-24 md:pb-7 pt-6">
         <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
-          <div className="flex items-center gap-2.5">
-            <GymLogoMark className="h-7 w-7 shrink-0" />
-            <span className="font-display text-base font-bold tracking-wider text-slate-950 dark:text-[#F3F5F7]">
-              IRON<span className="text-lime-700 dark:text-[#C8FF00]">PULSE</span> GYM
+          <div className="flex items-center gap-2.5 min-w-0">
+            <BrandLogoAvatar
+              logoUrl={branding.logoUrl}
+              gymName={branding.gymName}
+              className="h-7 w-7"
+            />
+            <span className="font-display text-base font-bold tracking-wider text-slate-950 dark:text-[#F3F5F7] truncate">
+              {headerWordmark.lead}
+              {headerWordmark.accent ? (
+                <>
+                  {headerWordmark.lead === 'IRON' && headerWordmark.accent === 'PULSE'
+                    ? ''
+                    : ' '}
+                  <span className="text-lime-700 dark:text-[#C8FF00]">
+                    {headerWordmark.accent}
+                  </span>
+                </>
+              ) : null}
+              {headerWordmark.trailing ? (
+                <span className="text-slate-700 dark:text-slate-300">
+                  {' '}
+                  {headerWordmark.trailing}
+                </span>
+              ) : null}
             </span>
           </div>
           <p className="text-xs sm:text-sm font-medium text-slate-600 dark:text-[#94A3B8]">
@@ -632,34 +759,57 @@ export default function App() {
         </div>
       )}
 
+      {/* Offline Connectivity Indicator */}
+      <OfflineIndicator />
+
       {/* Mobile Ergonomic Bottom Nav */}
       <MobileBottomNav
         activeFilter={statusFilter}
         expiringCount={metrics.expiringSoon}
         expiredCount={metrics.expired}
-        onSelectFilter={setStatusFilter}
+        onSelectFilter={(filter) => {
+          setStatusFilter(filter);
+          if (filter === 'all') setBalanceOnly(false);
+        }}
         onAddMember={openAddModal}
       />
 
       {/* Add / Manage Member Modal */}
       <MemberFormModal
         isOpen={isFormOpen}
-        initialMode={formInitialMode}
+        currency={branding.currency}
         editingMember={editingMember}
         onClose={() => {
           setIsFormOpen(false);
           setEditingMember(null);
         }}
         onSave={handleSaveMember}
-        onBulkImport={handleBulkImport}
         onQuickRenew={handleQuickRenew}
+        onSettleBalance={handleSettleBalance}
         onDelete={handleDeleteMember}
+      />
+
+      {/* Quick Mark Paid (Cash / UPI) Modal */}
+      <QuickPayModal
+        member={quickPayMember}
+        currency={branding.currency}
+        onClose={() => setQuickPayMember(null)}
+        onConfirm={handleQuickPay}
+      />
+
+      {/* Custom Gym Branding Settings Modal */}
+      <BrandingSettingsModal
+        isOpen={isSettingsOpen}
+        branding={branding}
+        onClose={() => setIsSettingsOpen(false)}
+        onSave={handleSaveBranding}
       />
 
       {/* Direct WhatsApp / Email Composer Modal */}
       <MessageComposerModal
         member={messagingState?.member ?? null}
         initialChannel={messagingState?.channel ?? 'whatsapp'}
+        branding={branding}
         onClose={() => setMessagingState(null)}
         onMarkMessaged={handleMarkMessaged}
       />
