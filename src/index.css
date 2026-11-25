@@ -38,6 +38,15 @@
     outline-offset: 2px;
   }
 
+  /* Prevent iOS Safari native date input from overflowing its container */
+  input[type="date"] {
+    -webkit-appearance: none;
+    appearance: none;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+
   /* Clean native date picker icon in dark mode */
   html.dark input[type="date"]::-webkit-calendar-picker-indicator {
     filter: invert(0.88);

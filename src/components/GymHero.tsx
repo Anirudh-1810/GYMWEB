@@ -192,10 +192,10 @@ export function GymHero({
               <button
                 type="button"
                 onClick={onSignOut}
-                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 backdrop-blur-sm px-3 py-2 text-xs font-semibold text-slate-100 hover:border-rose-400/70 hover:bg-rose-500/20 hover:text-rose-200 transition-colors whitespace-nowrap"
+                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-rose-400/45 bg-rose-500/15 backdrop-blur-sm px-3.5 py-2 text-xs font-semibold text-rose-100 hover:border-rose-300 hover:bg-rose-500/30 hover:text-white transition-colors whitespace-nowrap"
               >
                 <LogOut className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                <span>Sign Out</span>
+                <span>Logout</span>
               </button>
             )}
           </div>

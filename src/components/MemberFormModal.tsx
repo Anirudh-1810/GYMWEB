@@ -780,7 +780,7 @@ export function MemberFormModal({
 
                 {/* Custom Fees + Paid Date */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
+                  <div className="min-w-0">
                     <label
                       htmlFor="member-fees"
                       className="block text-xs font-medium text-slate-800 dark:text-[#CBD5E1] mb-1.5"
@@ -808,7 +808,7 @@ export function MemberFormModal({
                           if (errors.fees) setErrors((prev) => ({ ...prev, fees: undefined }));
                         }}
                         aria-invalid={Boolean(errors.fees)}
-                        className="w-full min-h-[44px] rounded-lg border border-slate-300 dark:border-white/[0.12] bg-white dark:bg-[#0B0E13] pl-10 pr-3.5 py-2.5 font-mono text-sm font-semibold tabular-nums text-slate-950 dark:text-[#F3F5F7] placeholder:font-normal placeholder:text-slate-400 dark:placeholder:text-[#64748B] focus:border-slate-950 dark:focus:border-[#C8FF00] focus:outline-none"
+                        className="block w-full min-w-0 max-w-full box-border min-h-[44px] rounded-lg border border-slate-300 dark:border-white/[0.12] bg-white dark:bg-[#0B0E13] pl-10 pr-3.5 py-2.5 font-mono text-sm font-semibold tabular-nums text-slate-950 dark:text-[#F3F5F7] placeholder:font-normal placeholder:text-slate-400 dark:placeholder:text-[#64748B] focus:border-slate-950 dark:focus:border-[#C8FF00] focus:outline-none"
                       />
                     </div>
                     <div className="mt-2 flex flex-wrap gap-1.5">
@@ -840,7 +840,7 @@ export function MemberFormModal({
                     )}
                   </div>
 
-                  <div>
+                  <div className="min-w-0">
                     <label
                       htmlFor="member-paid-date"
                       className="block text-xs font-medium text-slate-800 dark:text-[#CBD5E1] mb-1.5"
@@ -859,7 +859,7 @@ export function MemberFormModal({
                         }
                       }}
                       aria-invalid={Boolean(errors.paidDate)}
-                      className="w-full min-h-[44px] rounded-lg border border-slate-300 dark:border-white/[0.12] bg-white dark:bg-[#0B0E13] px-3.5 py-2.5 font-mono text-sm text-slate-950 dark:text-[#F3F5F7] focus:border-slate-950 dark:focus:border-[#C8FF00] focus:outline-none"
+                      className="block w-full min-w-0 max-w-full box-border appearance-none min-h-[44px] rounded-lg border border-slate-300 dark:border-white/[0.12] bg-white dark:bg-[#0B0E13] px-3 py-2.5 text-left font-mono text-sm text-slate-950 dark:text-[#F3F5F7] focus:border-slate-950 dark:focus:border-[#C8FF00] focus:outline-none"
                     />
                     {errors.paidDate && (
                       <p role="alert" className="mt-1.5 text-xs font-medium text-rose-700 dark:text-rose-400">

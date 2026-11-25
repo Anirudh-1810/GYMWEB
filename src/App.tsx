@@ -10,10 +10,11 @@ import {
   ChevronDown,
   Database,
   Loader2,
+  LogOut,
   Moon,
   Plus,
   Search,
-  Sparkles,
+  Settings,
   Sun,
   UserPlus,
   X,
@@ -30,7 +31,6 @@ import { OfflineIndicator } from './components/OfflineIndicator';
 import { ProfileMenu } from './components/ProfileMenu';
 import { QuickPayModal } from './components/QuickPayModal';
 import { RevenueSummary } from './components/RevenueSummary';
-import { createSeedMembers } from './data/seedMembers';
 import { supabase } from './lib/supabase';
 import {
   DEFAULT_BRANDING,
@@ -61,7 +61,6 @@ import {
   sanitizeAuthError,
   updateUserMember,
   upsertUserBranding,
-  upsertUserMembersBatch,
   writeUserCachedBranding,
   writeUserCachedMembers,
 } from './utils/supabaseSync';
@@ -161,23 +160,25 @@ export default function App() {
       }
     };
 
-    const hydrateSession = async () => {
+    const hydrateSession = async (isInitial = false) => {
       try {
         const { data, error } = await client.auth.getSession();
         if (!isMounted) return;
         if (error) {
-          setAuthError(sanitizeAuthError(error));
-          setSession(null);
-        } else {
-          setSession(data.session ?? null);
-          if (data.session) {
-            cleanOAuthCodeFromUrl();
+          if (isInitial) {
+            setAuthError(sanitizeAuthError(error));
           }
+          return;
+        }
+        if (data.session) {
+          setSession(data.session);
+          cleanOAuthCodeFromUrl();
+        } else if (isInitial) {
+          setSession(null);
         }
       } catch (err) {
-        if (isMounted) {
+        if (isMounted && isInitial) {
           setAuthError(sanitizeAuthError(err));
-          setSession(null);
         }
       } finally {
         if (isMounted) {
@@ -186,28 +187,35 @@ export default function App() {
       }
     };
 
-    void hydrateSession();
+    void hydrateSession(true);
 
     const {
       data: { subscription },
-    } = client.auth.onAuthStateChange((_event, nextSession) => {
+    } = client.auth.onAuthStateChange((event, nextSession) => {
       if (!isMounted) return;
-      setSession(nextSession);
-      setAuthLoading(false);
+      if (event === 'SIGNED_OUT') {
+        setSession(null);
+        setAuthLoading(false);
+        return;
+      }
       if (nextSession) {
+        setSession(nextSession);
         setAuthError(null);
         cleanOAuthCodeFromUrl();
+      } else if (event === 'INITIAL_SESSION') {
+        setSession(null);
       }
+      setAuthLoading(false);
     });
 
     const handleStorageSync = (event: StorageEvent) => {
       if (event.key && event.key.includes('auth-token')) {
-        void hydrateSession();
+        void hydrateSession(true);
       }
     };
 
     const handleWindowFocus = () => {
-      void hydrateSession();
+      void hydrateSession(false);
     };
 
     window.addEventListener('storage', handleStorageSync);
@@ -363,8 +371,13 @@ export default function App() {
     try {
       await supabase.auth.signOut();
     } catch {
-      // Ensure local session clears cleanly even if network fails
+      try {
+        await supabase.auth.signOut({ scope: 'local' });
+      } catch {
+        // Ensure local session clears cleanly even if network fails
+      }
     } finally {
+      setAuthError(null);
       setSession(null);
       setMembers([]);
       setBranding({ ...DEFAULT_BRANDING });
@@ -379,6 +392,8 @@ export default function App() {
       void createUserMember(supabase, userId, createdMember).then((res) => {
         if (res.schemaMissing) {
           setSchemaMissing(true);
+        } else if (!res.ok && res.errorMessage) {
+          showToast(res.errorMessage);
         }
       });
     }
@@ -391,6 +406,8 @@ export default function App() {
       void updateUserMember(supabase, userId, savedMember).then((res) => {
         if (res.schemaMissing) {
           setSchemaMissing(true);
+        } else if (!res.ok && res.errorMessage) {
+          showToast(res.errorMessage);
         }
       });
     }
@@ -529,7 +546,11 @@ export default function App() {
     writeUserCachedMembers(userId, nextMembers);
     if (supabase) {
       void deleteUserMember(supabase, userId, memberId).then((res) => {
-        if (res.schemaMissing) setSchemaMissing(true);
+        if (res.schemaMissing) {
+          setSchemaMissing(true);
+        } else if (!res.ok && res.errorMessage) {
+          showToast(res.errorMessage);
+        }
       });
     }
     setIsFormOpen(false);
@@ -558,24 +579,15 @@ export default function App() {
     writeUserCachedBranding(userId, nextBranding);
     if (supabase) {
       void upsertUserBranding(supabase, userId, nextBranding).then((res) => {
-        if (res.schemaMissing) setSchemaMissing(true);
+        if (res.schemaMissing) {
+          setSchemaMissing(true);
+        } else if (!res.ok && res.errorMessage) {
+          showToast(res.errorMessage);
+        }
       });
     }
     setIsSettingsOpen(false);
     showToast(`Saved branding for ${nextBranding.gymName}`);
-  };
-
-  const handleLoadSampleMembers = () => {
-    if (!userId) return;
-    const samples = createSeedMembers();
-    setMembers(samples);
-    writeUserCachedMembers(userId, samples);
-    if (supabase) {
-      void upsertUserMembersBatch(supabase, userId, samples).then((res) => {
-        if (res.schemaMissing) setSchemaMissing(true);
-      });
-    }
-    showToast(`Loaded ${samples.length} sample members into your account`);
   };
 
   const filterTabs: Array<{ id: StatusFilter; label: string; count: number }> = [
@@ -707,6 +719,17 @@ export default function App() {
                 onSignOut={handleSignOut}
               />
             )}
+
+            <button
+              type="button"
+              onClick={handleSignOut}
+              aria-label="Logout and switch Google account"
+              title="Logout to switch Gmail account"
+              className="inline-flex h-10 items-center justify-center gap-1.5 rounded-lg border border-rose-300/80 bg-rose-50 px-2.5 sm:px-3 text-xs font-semibold text-rose-700 hover:bg-rose-100 hover:border-rose-400 dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-300 dark:hover:bg-rose-500/20 dark:hover:border-rose-400/60 transition-colors whitespace-nowrap shrink-0"
+            >
+              <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span className="hidden sm:inline">Logout</span>
+            </button>
           </div>
         </div>
       </header>
@@ -935,7 +958,7 @@ export default function App() {
               No Clients Yet
             </h2>
             <p className="mt-1.5 max-w-md text-sm text-slate-600 dark:text-[#8A97AB]">
-              Your account is fresh and private. Add your first gym member to start tracking fees, Cash/UPI payments, and renewal dates—or load sample members to explore.
+              Your account starts completely clean—no predefined data. Add your first gym member to save it directly to your database, or customize your gym name and logo.
             </p>
             <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
               <button
@@ -948,11 +971,11 @@ export default function App() {
               </button>
               <button
                 type="button"
-                onClick={handleLoadSampleMembers}
+                onClick={() => setIsSettingsOpen(true)}
                 className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-slate-300 dark:border-white/[0.14] bg-white dark:bg-transparent px-4 py-2.5 text-sm font-semibold text-slate-800 hover:border-slate-950 dark:text-[#CBD5E1] dark:hover:border-[#C8FF00]/60 dark:hover:text-[#C8FF00] transition-colors"
               >
-                <Sparkles className="h-4 w-4" aria-hidden="true" />
-                <span>Load Sample Members</span>
+                <Settings className="h-4 w-4" aria-hidden="true" />
+                <span>Gym Settings</span>
               </button>
             </div>
           </section>
@@ -996,9 +1019,9 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-slate-200 dark:border-white/[0.08] bg-white/80 dark:bg-[#0B0E13] pb-24 md:pb-7 pt-6">
-        <div className="mx-auto flex max-w-7xl flex-col gap-3 px-4 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
-          <div className="flex items-center gap-2.5 min-w-0">
+      <footer className="border-t border-slate-200 dark:border-white/[0.08] bg-white/80 dark:bg-[#0B0E13] pb-24 md:pb-7 pt-5 sm:pt-6">
+        <div className="mx-auto flex max-w-7xl flex-row flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center gap-2 min-w-0">
             <BrandLogoAvatar
               logoUrl={branding.logoUrl}
               gymName={branding.gymName}
@@ -1024,7 +1047,7 @@ export default function App() {
               ) : null}
             </span>
           </div>
-          <p className="text-xs sm:text-sm font-medium text-slate-600 dark:text-[#94A3B8]">
+          <p className="text-xs sm:text-sm font-medium text-slate-600 dark:text-[#94A3B8] text-right whitespace-nowrap">
             Made by{' '}
             <span className="font-semibold text-slate-950 dark:text-[#F3F5F7]">
               Anirudh Sharma

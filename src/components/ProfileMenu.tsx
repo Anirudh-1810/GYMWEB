@@ -149,7 +149,7 @@ export function ProfileMenu({
               className="w-full flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-left text-sm font-semibold text-rose-700 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-500/12 transition-colors"
             >
               <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />
-              <span>Sign Out</span>
+              <span>Logout / Switch Gmail</span>
             </button>
           </div>
         </div>

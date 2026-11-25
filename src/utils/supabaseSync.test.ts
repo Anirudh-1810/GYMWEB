@@ -137,3 +137,23 @@ test('getUserDisplayInfo extracts name, safe https avatar, and initials', () => 
   assert.equal(unsafeAvatar.avatarUrl, undefined);
   assert.equal(unsafeAvatar.displayName, 'coach');
 });
+
+test('formatDbSyncError maps RLS, expired JWT, missing tables, and generic errors cleanly', async () => {
+  const { formatDbSyncError } = await import('./supabaseSync');
+  assert.match(
+    formatDbSyncError({ code: '42501', message: 'new row violates row-level security policy' }),
+    /permission check/i
+  );
+  assert.match(
+    formatDbSyncError({ code: 'PGRST301', message: 'JWT expired' }),
+    /session expired/i
+  );
+  assert.match(
+    formatDbSyncError({ code: '42P01', message: 'relation "public.members" does not exist' }),
+    /schema\.sql/i
+  );
+  assert.match(
+    formatDbSyncError({ message: 'TypeError: Failed to fetch' }),
+    /internet connection/i
+  );
+});

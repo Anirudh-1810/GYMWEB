@@ -50,10 +50,61 @@ export interface WorkspaceLoadResult {
   errorMessage?: string;
 }
 
-export interface CloudSyncResult {
+export interface CloudSyncResult<T = undefined> {
   ok: boolean;
+  data?: T;
   schemaMissing?: boolean;
   errorMessage?: string;
+}
+
+const LEGACY_STATIC_STORAGE_KEYS = [
+  'ironpulse_members_v1',
+  'ironpulse_gym_branding_v1',
+];
+
+/**
+ * Removes any legacy pre-auth localStorage keys that previously stored static
+ * seed data across the browser, ensuring every Gmail account is 100% isolated.
+ */
+export function purgeLegacyStaticStorage(): void {
+  try {
+    for (const key of LEGACY_STATIC_STORAGE_KEYS) {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore storage access errors in restricted environments
+  }
+}
+
+/**
+ * Converts a Supabase PostgREST / PostgreSQL error into a concise, actionable
+ * user-facing message without leaking raw internal stack traces.
+ */
+export function formatDbSyncError(error: unknown): string {
+  if (!error || typeof error !== 'object') {
+    return 'Could not sync to Supabase right now — saved locally on this device.';
+  }
+  const err = error as { code?: unknown; message?: unknown };
+  const code = typeof err.code === 'string' ? err.code : '';
+  const message = typeof err.message === 'string' ? err.message.toLowerCase() : '';
+
+  if (isMissingTableError(error)) {
+    return 'Run supabase/schema.sql in your Supabase SQL Editor to create the members & gym_branding tables.';
+  }
+  if (
+    code === '42501' ||
+    message.includes('row-level security') ||
+    message.includes('permission denied')
+  ) {
+    return 'Supabase permission check blocked this write. Sign out and sign back in, or re-run the RLS policies in supabase/schema.sql.';
+  }
+  if (code === '23503' || message.includes('foreign key')) {
+    return 'Your login session needs a quick refresh. Please log out and sign in with Google again.';
+  }
+  if (message.includes('jwt') || message.includes('not authenticated') || code === 'PGRST301') {
+    return 'Your session expired. Please log out and sign in again to sync to Supabase.';
+  }
+  return 'Could not sync to Supabase right now — check your internet connection and try again.';
 }
 
 /**
@@ -324,6 +375,7 @@ export async function loadUserWorkspace(
   client: SupabaseClient,
   userId: string
 ): Promise<WorkspaceLoadResult> {
+  purgeLegacyStaticStorage();
   const cachedMembers = readUserCachedMembers(userId);
   const cachedBranding = readUserCachedBranding(userId);
 
@@ -356,7 +408,7 @@ export async function loadUserWorkspace(
         branding: cachedBranding,
         cloudConnected: false,
         schemaMissing: false,
-        errorMessage: 'Cloud sync paused — showing your saved local copy.',
+        errorMessage: formatDbSyncError(primaryError),
       };
     }
 
@@ -365,7 +417,7 @@ export async function loadUserWorkspace(
     );
     const remoteBranding = brandingRes.data
       ? dbRowToBranding(brandingRes.data as Record<string, unknown>)
-      : cachedBranding;
+      : { ...DEFAULT_BRANDING };
 
     writeUserCachedMembers(userId, remoteMembers);
     writeUserCachedBranding(userId, remoteBranding);
@@ -382,7 +434,7 @@ export async function loadUserWorkspace(
       branding: cachedBranding,
       cloudConnected: false,
       schemaMissing: false,
-      errorMessage: 'Offline mode — changes will stay scoped to your account on this device.',
+      errorMessage: 'Offline mode — showing your saved local copy for this account.',
     };
   }
 }
@@ -391,23 +443,29 @@ export async function createUserMember(
   client: SupabaseClient,
   userId: string,
   member: Member
-): Promise<CloudSyncResult> {
+): Promise<CloudSyncResult<Member>> {
   try {
-    const { error } = await client
+    const { data, error } = await client
       .from('members')
-      .insert(memberToDbRow(member, userId));
+      .insert(memberToDbRow(member, userId))
+      .select()
+      .single();
     if (error) {
       return {
         ok: false,
         schemaMissing: isMissingTableError(error),
-        errorMessage: isMissingTableError(error)
-          ? undefined
-          : 'Saved locally — cloud sync will retry next time.',
+        errorMessage: formatDbSyncError(error),
       };
     }
-    return { ok: true };
+    return {
+      ok: true,
+      data: data ? dbRowToMember(data as Record<string, unknown>) : member,
+    };
   } catch {
-    return { ok: false, errorMessage: 'Saved locally while offline.' };
+    return {
+      ok: false,
+      errorMessage: 'Saved locally while offline — reconnect to sync to Supabase.',
+    };
   }
 }
 
@@ -415,7 +473,7 @@ export async function updateUserMember(
   client: SupabaseClient,
   userId: string,
   member: Member
-): Promise<CloudSyncResult> {
+): Promise<CloudSyncResult<Member>> {
   try {
     const row = memberToDbRow(member, userId);
     const { data, error } = await client
@@ -423,26 +481,31 @@ export async function updateUserMember(
       .update(row)
       .eq('user_id', userId)
       .eq('id', member.id)
-      .select('id');
+      .select()
+      .maybeSingle();
 
     if (error) {
       return {
         ok: false,
         schemaMissing: isMissingTableError(error),
-        errorMessage: isMissingTableError(error)
-          ? undefined
-          : 'Saved locally — cloud sync will retry next time.',
+        errorMessage: formatDbSyncError(error),
       };
     }
 
-    // If the record existed only in offline cache before tables were created, insert it now
-    if (!data || data.length === 0) {
+    // If the record existed only in offline cache before tables were created, upsert it now
+    if (!data) {
       return upsertUserMember(client, userId, member);
     }
 
-    return { ok: true };
+    return {
+      ok: true,
+      data: dbRowToMember(data as Record<string, unknown>),
+    };
   } catch {
-    return { ok: false, errorMessage: 'Saved locally while offline.' };
+    return {
+      ok: false,
+      errorMessage: 'Saved locally while offline — reconnect to sync to Supabase.',
+    };
   }
 }
 
@@ -450,46 +513,29 @@ export async function upsertUserMember(
   client: SupabaseClient,
   userId: string,
   member: Member
-): Promise<CloudSyncResult> {
+): Promise<CloudSyncResult<Member>> {
   try {
-    const { error } = await client
+    const { data, error } = await client
       .from('members')
-      .upsert(memberToDbRow(member, userId), { onConflict: 'user_id,id' });
+      .upsert(memberToDbRow(member, userId), { onConflict: 'user_id,id' })
+      .select()
+      .single();
     if (error) {
       return {
         ok: false,
         schemaMissing: isMissingTableError(error),
-        errorMessage: isMissingTableError(error)
-          ? undefined
-          : 'Saved locally — cloud sync will retry next time.',
+        errorMessage: formatDbSyncError(error),
       };
     }
-    return { ok: true };
+    return {
+      ok: true,
+      data: data ? dbRowToMember(data as Record<string, unknown>) : member,
+    };
   } catch {
-    return { ok: false, errorMessage: 'Saved locally while offline.' };
-  }
-}
-
-export async function upsertUserMembersBatch(
-  client: SupabaseClient,
-  userId: string,
-  members: Member[]
-): Promise<CloudSyncResult> {
-  if (members.length === 0) return { ok: true };
-  try {
-    const rows = members.map((m) => memberToDbRow(m, userId));
-    const { error } = await client
-      .from('members')
-      .upsert(rows, { onConflict: 'user_id,id' });
-    if (error) {
-      return {
-        ok: false,
-        schemaMissing: isMissingTableError(error),
-      };
-    }
-    return { ok: true };
-  } catch {
-    return { ok: false };
+    return {
+      ok: false,
+      errorMessage: 'Saved locally while offline — reconnect to sync to Supabase.',
+    };
   }
 }
 
@@ -508,11 +554,15 @@ export async function deleteUserMember(
       return {
         ok: false,
         schemaMissing: isMissingTableError(error),
+        errorMessage: formatDbSyncError(error),
       };
     }
     return { ok: true };
   } catch {
-    return { ok: false };
+    return {
+      ok: false,
+      errorMessage: 'Removed locally while offline — reconnect to sync to Supabase.',
+    };
   }
 }
 
@@ -520,19 +570,28 @@ export async function upsertUserBranding(
   client: SupabaseClient,
   userId: string,
   branding: GymBranding
-): Promise<CloudSyncResult> {
+): Promise<CloudSyncResult<GymBranding>> {
   try {
-    const { error } = await client
+    const { data, error } = await client
       .from('gym_branding')
-      .upsert(brandingToDbRow(branding, userId), { onConflict: 'user_id' });
+      .upsert(brandingToDbRow(branding, userId), { onConflict: 'user_id' })
+      .select()
+      .single();
     if (error) {
       return {
         ok: false,
         schemaMissing: isMissingTableError(error),
+        errorMessage: formatDbSyncError(error),
       };
     }
-    return { ok: true };
+    return {
+      ok: true,
+      data: data ? dbRowToBranding(data as Record<string, unknown>) : branding,
+    };
   } catch {
-    return { ok: false };
+    return {
+      ok: false,
+      errorMessage: 'Saved branding locally while offline — reconnect to sync to Supabase.',
+    };
   }
 }
