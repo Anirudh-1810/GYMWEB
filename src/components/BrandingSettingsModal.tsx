@@ -1,5 +1,5 @@
 import { ChangeEvent, FormEvent, useEffect, useRef, useState } from 'react';
-import { RotateCcw, Upload, X } from 'lucide-react';
+import { LogOut, RotateCcw, Upload, X } from 'lucide-react';
 import {
   CURRENCY_OPTIONS,
   CurrencyCode,
@@ -11,18 +11,28 @@ import {
 import { GymLogoMark } from './GymHero';
 import { PWAInstallButton } from './PWAInstallButton';
 
+interface AccountSummary {
+  displayName: string;
+  email: string;
+  photoURL?: string | null;
+}
+
 interface BrandingSettingsModalProps {
   isOpen: boolean;
   branding: GymBranding;
+  account?: AccountSummary | null;
   onClose: () => void;
   onSave: (nextBranding: GymBranding) => void;
+  onSignOut?: () => void;
 }
 
 export function BrandingSettingsModal({
   isOpen,
   branding,
+  account,
   onClose,
   onSave,
+  onSignOut,
 }: BrandingSettingsModalProps) {
   const [gymName, setGymName] = useState(branding.gymName);
   const [logoUrl, setLogoUrl] = useState<string | undefined>(branding.logoUrl);
@@ -329,6 +339,50 @@ export function BrandingSettingsModal({
               />
             </div>
           </div>
+
+          {/* Connected Account */}
+          {account && onSignOut && (
+            <div>
+              <span className="block text-xs font-medium text-slate-800 dark:text-[#CBD5E1] mb-1.5">
+                Signed-In Account
+              </span>
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-[#0B0E13] px-4 py-3.5">
+                <div className="flex items-center gap-3 min-w-0">
+                  {account.photoURL ? (
+                    <img
+                      src={account.photoURL}
+                      alt={account.displayName}
+                      referrerPolicy="no-referrer"
+                      className="h-9 w-9 rounded-full border border-slate-300 dark:border-white/15 object-cover shrink-0"
+                    />
+                  ) : (
+                    <div className="flex h-9 w-9 items-center justify-center rounded-full bg-slate-950 text-xs font-bold text-[#C8FF00] dark:bg-[#C8FF00] dark:text-[#090B0E] shrink-0">
+                      {account.displayName.slice(0, 2).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold text-slate-900 dark:text-[#F3F5F7] truncate">
+                      {account.displayName}
+                    </p>
+                    <p className="text-[11px] text-slate-600 dark:text-[#7E8B9E] truncate">
+                      {account.email}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onSignOut();
+                  }}
+                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border border-slate-300 dark:border-white/[0.12] bg-white dark:bg-[#161C25] px-3 py-1.5 text-xs font-semibold text-slate-800 hover:border-rose-400 hover:text-rose-700 dark:text-[#CBD5E1] dark:hover:border-rose-400/60 dark:hover:text-rose-300 transition-colors whitespace-nowrap"
+                >
+                  <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Sign Out</span>
+                </button>
+              </div>
+            </div>
+          )}
         </form>
 
         {/* Footer Actions */}

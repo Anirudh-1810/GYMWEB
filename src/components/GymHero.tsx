@@ -1,12 +1,15 @@
 import { useState } from 'react';
-import { Settings } from 'lucide-react';
+import { LogOut, Settings } from 'lucide-react';
 import { GymBranding, splitBrandWordmark } from '../utils/branding';
+import type { UserDisplayInfo } from '../utils/supabaseSync';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface GymHeroProps {
   branding: GymBranding;
   todayDisplay: string;
+  userInfo?: UserDisplayInfo | null;
   onOpenSettings: () => void;
+  onSignOut?: () => void;
 }
 
 const HERO_BACKDROP_SRC = '/src/assets/images/hero_gym_studio_1795519838843.jpg';
@@ -79,9 +82,12 @@ export function BrandLogoAvatar({
 export function GymHero({
   branding,
   todayDisplay,
+  userInfo,
   onOpenSettings,
+  onSignOut,
 }: GymHeroProps) {
   const [imgFailed, setImgFailed] = useState(false);
+  const [avatarFailed, setAvatarFailed] = useState(false);
   const wordmark = splitBrandWordmark(branding.gymName);
 
   return (
@@ -137,6 +143,34 @@ export function GymHero({
             <p className="mt-1.5 text-xs sm:text-sm text-slate-300 max-w-xl leading-relaxed">
               Strength &amp; Conditioning · Client Roster, Revenue &amp; Due Dates
             </p>
+            {userInfo && (
+              <div className="mt-2.5 inline-flex items-center gap-2 text-xs text-slate-300">
+                {userInfo.avatarUrl && !avatarFailed ? (
+                  <img
+                    src={userInfo.avatarUrl}
+                    alt={userInfo.displayName}
+                    referrerPolicy="no-referrer"
+                    onError={() => setAvatarFailed(true)}
+                    className="h-5 w-5 rounded-full object-cover border border-white/25 shrink-0"
+                  />
+                ) : (
+                  <span
+                    aria-hidden="true"
+                    className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#C8FF00]/20 text-[10px] font-bold text-[#C8FF00] border border-[#C8FF00]/40 shrink-0"
+                  >
+                    {userInfo.initials}
+                  </span>
+                )}
+                <span className="truncate max-w-[230px] sm:max-w-[320px]">
+                  <strong className="font-semibold text-white">
+                    {userInfo.displayName}
+                  </strong>
+                  {userInfo.email ? (
+                    <span className="text-slate-300"> · {userInfo.email}</span>
+                  ) : null}
+                </span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -154,6 +188,16 @@ export function GymHero({
               <Settings className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
               <span>Gym Settings</span>
             </button>
+            {onSignOut && (
+              <button
+                type="button"
+                onClick={onSignOut}
+                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-white/20 bg-white/10 backdrop-blur-sm px-3 py-2 text-xs font-semibold text-slate-100 hover:border-rose-400/70 hover:bg-rose-500/20 hover:text-rose-200 transition-colors whitespace-nowrap"
+              >
+                <LogOut className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>Sign Out</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

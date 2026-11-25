@@ -4,23 +4,37 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUpDown, ChevronDown, Moon, Plus, Search, Sun, UserPlus, X } from 'lucide-react';
+import type { Session } from '@supabase/supabase-js';
+import {
+  ArrowUpDown,
+  ChevronDown,
+  Database,
+  Loader2,
+  Moon,
+  Plus,
+  Search,
+  Sparkles,
+  Sun,
+  UserPlus,
+  X,
+} from 'lucide-react';
 import { BrandingSettingsModal } from './components/BrandingSettingsModal';
-import { BrandLogoAvatar, GymHero } from './components/GymHero';
+import { BrandLogoAvatar, GymHero, GymLogoMark } from './components/GymHero';
+import { LoginPage } from './components/LoginPage';
 import { MemberCard } from './components/MemberCard';
 import { MemberFormModal } from './components/MemberFormModal';
 import { MessageComposerModal } from './components/MessageComposerModal';
 import { MetricsStrip } from './components/MetricsStrip';
 import { MobileBottomNav } from './components/MobileBottomNav';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { ProfileMenu } from './components/ProfileMenu';
 import { QuickPayModal } from './components/QuickPayModal';
 import { RevenueSummary } from './components/RevenueSummary';
 import { createSeedMembers } from './data/seedMembers';
+import { supabase } from './lib/supabase';
 import {
-  BRANDING_STORAGE_KEY,
   DEFAULT_BRANDING,
   GymBranding,
-  resolveGymBranding,
   splitBrandWordmark,
 } from './utils/branding';
 import {
@@ -36,10 +50,21 @@ import {
   filterAndSortMembers,
   formatCurrency,
   formatDisplayDate,
-  migrateStoredMember,
   recordQuickPayment,
   toIsoDateString,
 } from './utils/memberLogic';
+import {
+  createUserMember,
+  deleteUserMember,
+  getUserDisplayInfo,
+  loadUserWorkspace,
+  sanitizeAuthError,
+  updateUserMember,
+  upsertUserBranding,
+  upsertUserMembersBatch,
+  writeUserCachedBranding,
+  writeUserCachedMembers,
+} from './utils/supabaseSync';
 import {
   THEME_STORAGE_KEY,
   ThemeMode,
@@ -47,47 +72,6 @@ import {
   getNextTheme,
   resolveInitialTheme,
 } from './utils/theme';
-
-const STORAGE_KEY = 'ironpulse_members_v1';
-
-function loadInitialMembers(): Member[] {
-  const seedMembers = createSeedMembers();
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return seedMembers;
-    }
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      const seedAvatarById = new Map(
-        seedMembers
-          .filter((m) => m.avatarUrl)
-          .map((m) => [m.id, m.avatarUrl as string])
-      );
-      return parsed
-        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-        .map((rawMember) =>
-          migrateStoredMember(
-            rawMember,
-            typeof rawMember.id === 'string' ? seedAvatarById.get(rawMember.id) : undefined
-          )
-        );
-    }
-  } catch {
-    // Fallback cleanly to deterministic seed data
-  }
-  return seedMembers;
-}
-
-function loadInitialBranding(): GymBranding {
-  try {
-    const raw = window.localStorage.getItem(BRANDING_STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_BRANDING };
-    return resolveGymBranding(JSON.parse(raw));
-  } catch {
-    return { ...DEFAULT_BRANDING };
-  }
-}
 
 export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(() => {
@@ -97,8 +81,19 @@ export default function App() {
       return 'dark';
     }
   });
-  const [branding, setBranding] = useState<GymBranding>(loadInitialBranding);
-  const [members, setMembers] = useState<Member[]>(loadInitialMembers);
+
+  // Supabase Auth state
+  const [authLoading, setAuthLoading] = useState(true);
+  const [session, setSession] = useState<Session | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  // Per-user dynamic workspace state
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const [schemaMissing, setSchemaMissing] = useState(false);
+  const [dismissedSchemaNotice, setDismissedSchemaNotice] = useState(false);
+  const [branding, setBranding] = useState<GymBranding>({ ...DEFAULT_BRANDING });
+  const [members, setMembers] = useState<Member[]>([]);
+
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [balanceOnly, setBalanceOnly] = useState(false);
@@ -118,6 +113,13 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
+  const userId = session?.user?.id ?? null;
+
+  const userInfo = useMemo(
+    () => (session?.user ? getUserDisplayInfo(session.user) : null),
+    [session]
+  );
+
   // Sync theme class on <html> and persist preference
   useEffect(() => {
     applyThemeToDocument(theme);
@@ -128,33 +130,156 @@ export default function App() {
     }
   }, [theme]);
 
-  // Persist custom gym branding and sync document & iOS home-screen title
+  // Initialize Supabase Auth session, subscribe to changes, and sync across tabs
   useEffect(() => {
-    document.title = `${branding.gymName} — Gym Client Dashboard`;
+    if (!supabase) {
+      setAuthLoading(false);
+      return;
+    }
+
+    let isMounted = true;
+    const client = supabase;
+
+    // Surface OAuth callback error query param cleanly if redirected back with an error
+    const urlParams = new URLSearchParams(window.location.search);
+    const oauthErrorDesc =
+      urlParams.get('error_description') || urlParams.get('error');
+    if (oauthErrorDesc) {
+      setAuthError(sanitizeAuthError(oauthErrorDesc));
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
+    const cleanOAuthCodeFromUrl = () => {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has('code')) {
+        params.delete('code');
+        const nextQuery = params.toString();
+        const nextUrl = nextQuery
+          ? `${window.location.pathname}?${nextQuery}`
+          : window.location.pathname;
+        window.history.replaceState({}, document.title, nextUrl);
+      }
+    };
+
+    const hydrateSession = async () => {
+      try {
+        const { data, error } = await client.auth.getSession();
+        if (!isMounted) return;
+        if (error) {
+          setAuthError(sanitizeAuthError(error));
+          setSession(null);
+        } else {
+          setSession(data.session ?? null);
+          if (data.session) {
+            cleanOAuthCodeFromUrl();
+          }
+        }
+      } catch (err) {
+        if (isMounted) {
+          setAuthError(sanitizeAuthError(err));
+          setSession(null);
+        }
+      } finally {
+        if (isMounted) {
+          setAuthLoading(false);
+        }
+      }
+    };
+
+    void hydrateSession();
+
+    const {
+      data: { subscription },
+    } = client.auth.onAuthStateChange((_event, nextSession) => {
+      if (!isMounted) return;
+      setSession(nextSession);
+      setAuthLoading(false);
+      if (nextSession) {
+        setAuthError(null);
+        cleanOAuthCodeFromUrl();
+      }
+    });
+
+    const handleStorageSync = (event: StorageEvent) => {
+      if (event.key && event.key.includes('auth-token')) {
+        void hydrateSession();
+      }
+    };
+
+    const handleWindowFocus = () => {
+      void hydrateSession();
+    };
+
+    window.addEventListener('storage', handleStorageSync);
+    window.addEventListener('focus', handleWindowFocus);
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+      window.removeEventListener('storage', handleStorageSync);
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, []);
+
+  // Load strictly per-user workspace whenever the authenticated user changes
+  useEffect(() => {
+    if (!userId || !supabase) {
+      // Wipe in-memory user data immediately when signed out
+      setMembers([]);
+      setBranding({ ...DEFAULT_BRANDING });
+      setSchemaMissing(false);
+      setDismissedSchemaNotice(false);
+      setWorkspaceLoading(false);
+      setSearchQuery('');
+      setStatusFilter('all');
+      setBalanceOnly(false);
+      setPaymentModeFilter('all');
+      setIsFormOpen(false);
+      setEditingMember(null);
+      setIsSettingsOpen(false);
+      setQuickPayMember(null);
+      setMessagingState(null);
+      return;
+    }
+
+    let cancelled = false;
+    setWorkspaceLoading(true);
+    setMembers([]);
+    setBranding({ ...DEFAULT_BRANDING });
+    setDismissedSchemaNotice(false);
+
+    void loadUserWorkspace(supabase, userId).then((result) => {
+      if (cancelled) return;
+      setMembers(result.members);
+      setBranding(result.branding);
+      setSchemaMissing(result.schemaMissing);
+      setWorkspaceLoading(false);
+      if (result.errorMessage) {
+        setToastMessage(result.errorMessage);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
+
+  // Sync document & iOS home-screen title with current user's gym branding
+  useEffect(() => {
+    document.title = session
+      ? `${branding.gymName} — Gym Client Dashboard`
+      : 'IronPulse Gym — Owner Login';
     const appleTitleMeta = document.querySelector(
       'meta[name="apple-mobile-web-app-title"]'
     );
     if (appleTitleMeta) {
       appleTitleMeta.setAttribute('content', branding.gymName);
     }
-    try {
-      window.localStorage.setItem(BRANDING_STORAGE_KEY, JSON.stringify(branding));
-    } catch {
-      // Ignore storage quota issues in restricted environments
-    }
-  }, [branding]);
+  }, [branding.gymName, session]);
 
-  // Persist roster updates to localStorage
+  // Press "/" anywhere outside inputs to focus search quickly (authenticated view only)
   useEffect(() => {
-    try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(members));
-    } catch {
-      // Ignore storage quota issues in restricted environments
-    }
-  }, [members]);
-
-  // Press "/" anywhere outside inputs to focus search quickly
-  useEffect(() => {
+    if (!session) return;
     const handleGlobalKey = (event: KeyboardEvent) => {
       if (
         event.key === '/' &&
@@ -172,7 +297,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleGlobalKey);
     return () => window.removeEventListener('keydown', handleGlobalKey);
-  }, [isFormOpen, messagingState, isSettingsOpen, quickPayMember]);
+  }, [session, isFormOpen, messagingState, isSettingsOpen, quickPayMember]);
 
   const showToast = (message: string) => {
     setToastMessage(message);
@@ -229,6 +354,48 @@ export default function App() {
     setPaymentModeFilter('all');
   };
 
+  const handleToggleTheme = () => {
+    setTheme((prev) => getNextTheme(prev));
+  };
+
+  const handleSignOut = async () => {
+    if (!supabase) return;
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // Ensure local session clears cleanly even if network fails
+    } finally {
+      setSession(null);
+      setMembers([]);
+      setBranding({ ...DEFAULT_BRANDING });
+    }
+  };
+
+  // Persist helpers for member create & update mutations (updates user-scoped cache + Supabase)
+  const syncMemberCreate = (updatedMembers: Member[], createdMember: Member) => {
+    if (!userId) return;
+    writeUserCachedMembers(userId, updatedMembers);
+    if (supabase) {
+      void createUserMember(supabase, userId, createdMember).then((res) => {
+        if (res.schemaMissing) {
+          setSchemaMissing(true);
+        }
+      });
+    }
+  };
+
+  const syncMemberUpdate = (updatedMembers: Member[], savedMember: Member) => {
+    if (!userId) return;
+    writeUserCachedMembers(userId, updatedMembers);
+    if (supabase) {
+      void updateUserMember(supabase, userId, savedMember).then((res) => {
+        if (res.schemaMissing) {
+          setSchemaMissing(true);
+        }
+      });
+    }
+  };
+
   const openAddModal = () => {
     setEditingMember(null);
     setIsFormOpen(true);
@@ -240,37 +407,41 @@ export default function App() {
   };
 
   const handleSaveMember = (input: MemberFormInput, editingId: string | null) => {
+    if (!userId) return;
     const computedRenewal =
       input.renewalDate || calculateRenewalFromPaidDate(input.paidDate, input.plan);
     const resolvedAmountPaid =
       input.amountPaid !== undefined ? input.amountPaid : input.fees;
 
     if (editingId) {
-      setMembers((prev) =>
-        prev.map((m) =>
-          m.id === editingId
-            ? {
-                ...m,
-                name: input.name,
-                phone: input.phone,
-                email: input.email,
-                plan: input.plan,
-                fees: input.fees,
-                amountPaid: resolvedAmountPaid,
-                paymentMode: input.paymentMode,
-                manualStatus: input.manualStatus,
-                paidDate: input.paidDate,
-                renewalDate: computedRenewal,
-                avatarUrl: input.avatarUrl,
-                notes: input.notes,
-              }
-            : m
-        )
-      );
+      let savedRecord: Member | null = null;
+      const nextMembers = members.map((m) => {
+        if (m.id !== editingId) return m;
+        savedRecord = {
+          ...m,
+          name: input.name,
+          phone: input.phone,
+          email: input.email,
+          plan: input.plan,
+          fees: input.fees,
+          amountPaid: resolvedAmountPaid,
+          paymentMode: input.paymentMode,
+          manualStatus: input.manualStatus,
+          paidDate: input.paidDate,
+          renewalDate: computedRenewal,
+          avatarUrl: input.avatarUrl,
+          notes: input.notes,
+        };
+        return savedRecord;
+      });
+      setMembers(nextMembers);
+      if (savedRecord) {
+        syncMemberUpdate(nextMembers, savedRecord);
+      }
       showToast(`Updated ${input.name}`);
     } else {
       const newMember: Member = {
-        id: `mem-${Date.now()}`,
+        id: `mem-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         name: input.name,
         phone: input.phone,
         email: input.email,
@@ -285,7 +456,9 @@ export default function App() {
         avatarUrl: input.avatarUrl,
         notes: input.notes,
       };
-      setMembers((prev) => [newMember, ...prev]);
+      const nextMembers = [newMember, ...members];
+      setMembers(nextMembers);
+      syncMemberCreate(nextMembers, newMember);
       resetAllFilters();
       showToast(`Added ${newMember.name} to your roster`);
     }
@@ -294,12 +467,13 @@ export default function App() {
   };
 
   const handleQuickPay = (memberId: string, paymentMode: PaymentMode) => {
+    if (!userId) return;
     const target = members.find((m) => m.id === memberId);
     if (!target) return;
     const updated = recordQuickPayment(target, paymentMode);
-    setMembers((prev) =>
-      prev.map((m) => (m.id === memberId ? updated : m))
-    );
+    const nextMembers = members.map((m) => (m.id === memberId ? updated : m));
+    setMembers(nextMembers);
+    syncMemberUpdate(nextMembers, updated);
     setQuickPayMember(null);
     showToast(
       `Marked ${target.name} paid via ${paymentMode} · Next due ${formatDisplayDate(updated.renewalDate)}`
@@ -307,39 +481,39 @@ export default function App() {
   };
 
   const handleQuickRenew = (memberId: string, months: number) => {
+    if (!userId) return;
     const target = members.find((m) => m.id === memberId);
     if (!target) return;
     const nextDate = extendRenewalDate(target.renewalDate, months);
     const todayIso = toIsoDateString(new Date());
-    setMembers((prev) =>
-      prev.map((m) =>
-        m.id === memberId
-          ? {
-              ...m,
-              paidDate: todayIso,
-              renewalDate: nextDate,
-              amountPaid: m.fees,
-              manualStatus: 'active',
-            }
-          : m
-      )
-    );
+    const updated: Member = {
+      ...target,
+      paidDate: todayIso,
+      renewalDate: nextDate,
+      amountPaid: target.fees,
+      manualStatus: 'active',
+    };
+    const nextMembers = members.map((m) => (m.id === memberId ? updated : m));
+    setMembers(nextMembers);
+    syncMemberUpdate(nextMembers, updated);
     setIsFormOpen(false);
     setEditingMember(null);
     showToast(`Renewed ${target.name} through ${formatDisplayDate(nextDate)}`);
   };
 
   const handleSettleBalance = (memberId: string) => {
+    if (!userId) return;
     const target = members.find((m) => m.id === memberId);
     if (!target) return;
     const todayIso = toIsoDateString(new Date());
-    setMembers((prev) =>
-      prev.map((m) =>
-        m.id === memberId
-          ? { ...m, amountPaid: m.fees, paidDate: todayIso }
-          : m
-      )
-    );
+    const updated: Member = {
+      ...target,
+      amountPaid: target.fees,
+      paidDate: todayIso,
+    };
+    const nextMembers = members.map((m) => (m.id === memberId ? updated : m));
+    setMembers(nextMembers);
+    syncMemberUpdate(nextMembers, updated);
     setIsFormOpen(false);
     setEditingMember(null);
     showToast(
@@ -348,8 +522,16 @@ export default function App() {
   };
 
   const handleDeleteMember = (memberId: string) => {
+    if (!userId) return;
     const target = members.find((m) => m.id === memberId);
-    setMembers((prev) => prev.filter((m) => m.id !== memberId));
+    const nextMembers = members.filter((m) => m.id !== memberId);
+    setMembers(nextMembers);
+    writeUserCachedMembers(userId, nextMembers);
+    if (supabase) {
+      void deleteUserMember(supabase, userId, memberId).then((res) => {
+        if (res.schemaMissing) setSchemaMissing(true);
+      });
+    }
     setIsFormOpen(false);
     setEditingMember(null);
     if (target) {
@@ -358,16 +540,42 @@ export default function App() {
   };
 
   const handleMarkMessaged = (memberId: string) => {
-    const nowIso = new Date().toISOString();
-    setMembers((prev) =>
-      prev.map((m) => (m.id === memberId ? { ...m, lastMessagedAt: nowIso } : m))
-    );
+    if (!userId) return;
+    const target = members.find((m) => m.id === memberId);
+    if (!target) return;
+    const updated: Member = {
+      ...target,
+      lastMessagedAt: new Date().toISOString(),
+    };
+    const nextMembers = members.map((m) => (m.id === memberId ? updated : m));
+    setMembers(nextMembers);
+    syncMemberUpdate(nextMembers, updated);
   };
 
   const handleSaveBranding = (nextBranding: GymBranding) => {
+    if (!userId) return;
     setBranding(nextBranding);
+    writeUserCachedBranding(userId, nextBranding);
+    if (supabase) {
+      void upsertUserBranding(supabase, userId, nextBranding).then((res) => {
+        if (res.schemaMissing) setSchemaMissing(true);
+      });
+    }
     setIsSettingsOpen(false);
     showToast(`Saved branding for ${nextBranding.gymName}`);
+  };
+
+  const handleLoadSampleMembers = () => {
+    if (!userId) return;
+    const samples = createSeedMembers();
+    setMembers(samples);
+    writeUserCachedMembers(userId, samples);
+    if (supabase) {
+      void upsertUserMembersBatch(supabase, userId, samples).then((res) => {
+        if (res.schemaMissing) setSchemaMissing(true);
+      });
+    }
+    showToast(`Loaded ${samples.length} sample members into your account`);
   };
 
   const filterTabs: Array<{ id: StatusFilter; label: string; count: number }> = [
@@ -378,10 +586,31 @@ export default function App() {
     { id: 'paused', label: 'Paused', count: metrics.paused },
   ];
 
-  const handleToggleTheme = () => {
-    setTheme((prev) => getNextTheme(prev));
-  };
+  // 1. Auth session bootstrap screen (prevents flashing dashboard or login prematurely)
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-[#F4F6F8] text-slate-950 dark:bg-[#090B0E] dark:text-[#F3F5F7] flex flex-col items-center justify-center px-6">
+        <GymLogoMark className="h-14 w-14" />
+        <div className="mt-4 flex items-center gap-2 text-sm font-medium text-slate-600 dark:text-[#94A3B8]">
+          <Loader2 className="h-4 w-4 animate-spin text-lime-700 dark:text-[#C8FF00]" aria-hidden="true" />
+          <span>Checking your gym session...</span>
+        </div>
+      </div>
+    );
+  }
 
+  // 2. Unauthenticated Login Page
+  if (!session) {
+    return (
+      <LoginPage
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
+        initialError={authError}
+      />
+    );
+  }
+
+  // 3. Authenticated Owner Dashboard
   return (
     <div className="min-h-screen bg-[#F4F6F8] text-slate-950 dark:bg-[#090B0E] dark:text-[#F3F5F7] flex flex-col transition-colors duration-150">
       {/* Top Navigation Bar (Strict 3-Zone Contract, compact 52px on mobile) */}
@@ -444,8 +673,8 @@ export default function App() {
             })}
           </nav>
 
-          {/* Zone 3: Theme Toggle + Primary Action */}
-          <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
+          {/* Zone 3: Theme Toggle, Primary Action & Profile Menu */}
+          <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
             <button
               type="button"
               onClick={handleToggleTheme}
@@ -464,11 +693,20 @@ export default function App() {
             <button
               type="button"
               onClick={openAddModal}
-              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-slate-950 text-[#C8FF00] hover:bg-slate-800 dark:bg-[#C8FF00] dark:text-[#090B0E] dark:hover:bg-[#D6FF3D] px-3.5 sm:px-4 py-2 text-xs sm:text-sm font-bold transition-colors duration-150 whitespace-nowrap shrink-0"
+              className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-slate-950 text-[#C8FF00] hover:bg-slate-800 dark:bg-[#C8FF00] dark:text-[#090B0E] dark:hover:bg-[#D6FF3D] px-2.5 sm:px-4 py-2 text-xs sm:text-sm font-bold transition-colors duration-150 whitespace-nowrap shrink-0"
             >
               <Plus className="h-4 w-4 stroke-[2.5] shrink-0" aria-hidden="true" />
-              <span>Add Member</span>
+              <span className="hidden sm:inline">Add Member</span>
+              <span className="sm:hidden">Add</span>
             </button>
+
+            {userInfo && (
+              <ProfileMenu
+                userInfo={userInfo}
+                onOpenSettings={() => setIsSettingsOpen(true)}
+                onSignOut={handleSignOut}
+              />
+            )}
           </div>
         </div>
       </header>
@@ -478,12 +716,42 @@ export default function App() {
         id="top"
         className="mx-auto w-full max-w-7xl flex-1 px-4 sm:px-6 lg:px-8 pt-4 sm:pt-7 pb-10"
       >
-        {/* Gym Hero Section: Logo, Name & Settings/Install Controls */}
+        {/* Gym Hero Section: Logo, Name, Signed-In Account, Settings & Sign Out */}
         <GymHero
           branding={branding}
           todayDisplay={todayDisplay}
+          userInfo={userInfo}
           onOpenSettings={() => setIsSettingsOpen(true)}
+          onSignOut={handleSignOut}
         />
+
+        {/* One-time Supabase SQL setup notice if tables haven't been created yet */}
+        {schemaMissing && !dismissedSchemaNotice && (
+          <div
+            role="status"
+            className="mb-5 flex items-start justify-between gap-3 rounded-xl border border-amber-300 dark:border-amber-500/35 bg-amber-50 dark:bg-amber-500/10 px-4 py-3 text-xs sm:text-sm text-amber-950 dark:text-amber-200"
+          >
+            <div className="flex items-start gap-2.5">
+              <Database className="h-4 w-4 mt-0.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden="true" />
+              <p>
+                <strong className="font-semibold">Cloud tables not set up yet:</strong>{' '}
+                Your data is currently saved privately for your login on this device. Run{' '}
+                <code className="font-mono text-xs px-1 py-0.5 rounded bg-amber-200/70 dark:bg-amber-400/15">
+                  supabase/schema.sql
+                </code>{' '}
+                in your Supabase SQL Editor to enable live multi-device cloud sync.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDismissedSchemaNotice(true)}
+              aria-label="Dismiss setup notice"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-md text-amber-800 hover:bg-amber-200/60 dark:text-amber-200 dark:hover:bg-amber-400/15 shrink-0"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+            </button>
+          </div>
+        )}
 
         {/* KPI Overview Strip */}
         <MetricsStrip
@@ -652,24 +920,41 @@ export default function App() {
           )}
         </div>
 
-        {/* Client Cards Grid or Empty States */}
-        {members.length === 0 ? (
+        {/* Client Cards Grid, Loading State, or Empty States */}
+        {workspaceLoading ? (
+          <section className="mt-4 flex flex-col items-center justify-center rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#11151B] px-6 py-16 text-center">
+            <Loader2 className="h-8 w-8 animate-spin text-lime-700 dark:text-[#C8FF00]" aria-hidden="true" />
+            <p className="mt-3 text-sm font-medium text-slate-600 dark:text-[#8A97AB]">
+              Loading your gym roster...
+            </p>
+          </section>
+        ) : members.length === 0 ? (
           <section className="mt-4 flex flex-col items-center justify-center rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#11151B] px-6 py-16 text-center">
             <UserPlus className="h-10 w-10 text-lime-700 dark:text-[#C8FF00]" aria-hidden="true" />
             <h2 className="mt-4 font-display text-2xl font-bold text-slate-950 dark:text-[#F3F5F7]">
               No Clients Yet
             </h2>
-            <p className="mt-1.5 max-w-sm text-sm text-slate-600 dark:text-[#8A97AB]">
-              Add your first gym member to track fees, renewal dates, and send quick WhatsApp or email reminders.
+            <p className="mt-1.5 max-w-md text-sm text-slate-600 dark:text-[#8A97AB]">
+              Your account is fresh and private. Add your first gym member to start tracking fees, Cash/UPI payments, and renewal dates—or load sample members to explore.
             </p>
-            <button
-              type="button"
-              onClick={openAddModal}
-              className="mt-6 inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-slate-950 text-[#C8FF00] hover:bg-slate-800 dark:bg-[#C8FF00] dark:text-[#090B0E] dark:hover:bg-[#D6FF3D] px-5 py-2.5 text-sm font-bold transition-colors"
-            >
-              <Plus className="h-4 w-4 stroke-[2.5]" aria-hidden="true" />
-              <span>Add First Member</span>
-            </button>
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={openAddModal}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-lg bg-slate-950 text-[#C8FF00] hover:bg-slate-800 dark:bg-[#C8FF00] dark:text-[#090B0E] dark:hover:bg-[#D6FF3D] px-5 py-2.5 text-sm font-bold transition-colors"
+              >
+                <Plus className="h-4 w-4 stroke-[2.5]" aria-hidden="true" />
+                <span>Add First Member</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleLoadSampleMembers}
+                className="inline-flex min-h-[44px] items-center gap-2 rounded-lg border border-slate-300 dark:border-white/[0.14] bg-white dark:bg-transparent px-4 py-2.5 text-sm font-semibold text-slate-800 hover:border-slate-950 dark:text-[#CBD5E1] dark:hover:border-[#C8FF00]/60 dark:hover:text-[#C8FF00] transition-colors"
+              >
+                <Sparkles className="h-4 w-4" aria-hidden="true" />
+                <span>Load Sample Members</span>
+              </button>
+            </div>
           </section>
         ) : visibleMembers.length === 0 ? (
           <section className="mt-4 flex flex-col items-center justify-center rounded-xl border border-slate-200 dark:border-white/[0.08] bg-white dark:bg-[#11151B] px-6 py-14 text-center">
